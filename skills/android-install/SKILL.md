@@ -1,4 +1,5 @@
 ---
+name: android-install
 description: Install an APK and launch it on an Android device
 allowed-tools: Bash(adb:*), Read, Glob
 argument-hint: "path to APK file (e.g., './app/build/outputs/apk/debug/app-debug.apk')"

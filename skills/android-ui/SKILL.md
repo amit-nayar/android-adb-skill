@@ -1,4 +1,5 @@
 ---
+name: android-ui
 description: Inspect the Android UI hierarchy and find elements
 allowed-tools: Bash(adb:*), Read
 argument-hint: "[optional] element to search for (e.g., 'Login button', 'text input fields')"

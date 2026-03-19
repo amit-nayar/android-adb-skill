@@ -1,4 +1,5 @@
 ---
+name: android-tap
 description: Tap an Android UI element by text, resource-id, or description
 allowed-tools: Bash(adb:*), Read
 argument-hint: element to tap (e.g., "Login button", "resource-id:com.app/btn_login", "content-desc:Navigate up")

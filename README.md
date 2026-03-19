@@ -1,25 +1,34 @@
 # android-adb-skill
 
-Claude Code skills for Android device automation via ADB — screenshots, UI inspection, gestures, app management, and debugging. No MCP server, no dependencies, just ADB.
+Android device automation via ADB for AI coding agents — screenshots, UI inspection, gestures, app management, and debugging. No MCP server, no dependencies, just ADB.
 
 ## What is this?
 
-A collection of [Claude Code custom slash commands](https://docs.anthropic.com/en/docs/claude-code/tutorials/custom-slash-commands) that give Claude full control over Android devices and emulators through ADB. Instead of running a separate MCP server, Claude calls `adb` directly and reasons about the results in real-time.
+A collection of skills and instruction files that give AI coding agents full control over Android devices and emulators through ADB. Instead of running a separate MCP server, the agent calls `adb` directly and reasons about the results in real-time.
+
+Works with multiple agents:
+
+| Agent | How it loads | Invocation |
+|-------|-------------|------------|
+| **Claude Code** | Plugin or copy `skills/` | `/android-adb-skill:android <task>` (plugin) or `/android <task>` (local) |
+| **Codex** | Reads `AGENTS.md` automatically | Natural language — references `skills/` for details |
+| **Cursor** | Reads `.cursor/rules/android-adb.mdc` | Activates when relevant via description match |
+| **GitHub Copilot** | Reads `.github/copilot-instructions.md` | Available in Copilot Chat context |
+| **Other agents** | Point them at `skills/*/SKILL.md` | Any agent that can read markdown and run shell commands |
 
 ### Why skills over MCP?
 
 | | MCP approach | Skill approach |
 |---|---|---|
 | **Multi-step flows** | One tool call per action, many round-trips | Single skill runs tap → wait → verify → retry |
-| **Error recovery** | AI sees failure, picks next tool | Claude adapts in real-time, retries with alternatives |
+| **Error recovery** | AI sees failure, picks next tool | Agent adapts in real-time, retries with alternatives |
 | **Dependencies** | Node.js, npm packages, MCP SDK | Just `adb` on PATH |
-| **Setup** | Configure MCP client + server process | Copy files, done |
-| **Composition** | Fixed tool schemas | Claude chains commands naturally |
-| **Image handling** | In-process compression | Claude reads screenshots directly |
+| **Setup** | Configure MCP client + server process | Copy files or install plugin |
+| **Composition** | Fixed tool schemas | Agent chains commands naturally |
 
 ## Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
+- An AI coding agent (Claude Code, Codex, Cursor, etc.)
 - Android SDK with `adb` on your PATH (or `ANDROID_HOME` set)
 - A connected Android device or running emulator
 
@@ -31,36 +40,60 @@ adb devices
 
 ## Installation
 
-### Global (available in all projects)
+### Claude Code (plugin)
 
 ```bash
-cp commands/* ~/.claude/commands/
+# From GitHub
+/plugin marketplace add <your-github-username>/android-adb-skill
+
+# Or from a local path during development
+claude --plugin-dir /path/to/android-adb-skill
 ```
 
-### Project-scoped
+Skills become available as `/android-adb-skill:android`, `/android-adb-skill:android-tap`, etc.
+
+### Claude Code (local copy)
 
 ```bash
-cp -r commands/ /path/to/your/project/.claude/commands/
+# Global (available in all projects)
+cp -r skills/* ~/.claude/skills/
+
+# Project-scoped
+mkdir -p .claude/skills
+cp -r skills/* .claude/skills/
 ```
 
-### CLAUDE.md (recommended)
+### Codex
 
-Copy `CLAUDE.md` to your project root or `~/.claude/CLAUDE.md` for global ADB knowledge in every conversation.
+Just clone or copy this repo into your project. Codex automatically reads `AGENTS.md` and can reference the skill files for detailed instructions.
+
+### Cursor
+
+Clone or copy this repo into your project. Cursor reads `.cursor/rules/android-adb.mdc` automatically when the rule description matches the conversation context.
+
+### GitHub Copilot
+
+Clone or copy this repo into your project. Copilot reads `.github/copilot-instructions.md` for context.
+
+### Other agents
+
+Point any agent that can read files and run shell commands at `skills/*/SKILL.md`. Each skill file is self-contained markdown with step-by-step instructions.
 
 ## Available Skills
 
-| Skill | Command | Description |
-|-------|---------|-------------|
-| **android** | `/android <task>` | General-purpose Android automation — routes to the right approach |
-| **android-screenshot** | `/android-screenshot [description]` | Capture and analyze a screenshot |
-| **android-ui** | `/android-ui [query]` | Inspect UI hierarchy and find elements |
-| **android-tap** | `/android-tap <element>` | Tap an element by text, resource-id, or description |
-| **android-navigate** | `/android-navigate <destination>` | Navigate to a specific screen with verification |
-| **android-scroll** | `/android-scroll <element>` | Scroll to find an element not currently visible |
-| **android-test** | `/android-test <flow>` | Run a multi-step test flow with pass/fail reporting |
-| **android-debug** | `/android-debug <issue>` | Collect and analyze logcat, crash logs, ANRs |
-| **android-install** | `/android-install <apk>` | Install APK, launch, and verify |
-| **android-device** | `/android-device [action]` | List devices, start emulators, get device info |
+| Skill | Description |
+|-------|-------------|
+| **android** | General-purpose Android automation — routes to the right approach |
+| **android-screenshot** | Capture and analyze a screenshot |
+| **android-ui** | Inspect UI hierarchy and find elements |
+| **android-tap** | Tap an element by text, resource-id, or description |
+| **android-navigate** | Navigate to a specific screen with verification |
+| **android-scroll** | Scroll to find an element not currently visible |
+| **android-gesture** | Swipe, long press, double tap, drag and drop |
+| **android-test** | Run a multi-step test flow with pass/fail reporting |
+| **android-debug** | Collect and analyze logcat, crash logs, ANRs |
+| **android-install** | Install APK, launch, and verify |
+| **android-device** | List devices, start emulators, get device info |
 
 ## Usage Examples
 
@@ -102,43 +135,30 @@ Copy `CLAUDE.md` to your project root or `~/.claude/CLAUDE.md` for global ADB kn
 /android fill in the registration form with test data
 ```
 
-## How It Works
+## Repo Structure
 
-Each skill is a markdown file with:
-1. **Frontmatter** — description, allowed tools, argument hints
-2. **Instructions** — step-by-step guide for Claude on how to accomplish the task
-3. **ADB commands** — the actual shell commands Claude will execute
-4. **Verification** — how to confirm the action worked
-
-Claude reads the skill, executes ADB commands via Bash, reads screenshots/UI trees to understand device state, and adapts its approach based on what it sees.
-
-## ADB Quick Reference
-
-```bash
-# Device management
-adb devices -l                              # List connected devices
-adb -s <device_id> shell ...                # Target specific device
-
-# Screenshots
-adb exec-out screencap -p > /tmp/screen.png # Capture screenshot
-
-# UI inspection
-adb shell uiautomator dump /dev/tty         # Dump UI hierarchy
-
-# Input
-adb shell input tap X Y                     # Tap at coordinates
-adb shell input swipe X1 Y1 X2 Y2 MS       # Swipe gesture
-adb shell input text 'hello'                # Type text
-adb shell input keyevent 66                 # Press key (66=Enter)
-
-# App management
-adb shell am start -n pkg/.Activity         # Launch app
-adb install -r app.apk                      # Install APK
-adb shell dumpsys activity activities       # Current activity
-
-# Logs
-adb logcat -d -t 200                        # Recent 200 log lines
-adb logcat -c                               # Clear log buffer
+```
+android-adb-skill/
+├── skills/                          # Core skill files (universal markdown)
+│   ├── android/SKILL.md
+│   ├── android-screenshot/SKILL.md
+│   ├── android-ui/SKILL.md
+│   ├── android-tap/SKILL.md
+│   ├── android-navigate/SKILL.md
+│   ├── android-scroll/SKILL.md
+│   ├── android-gesture/SKILL.md
+│   ├── android-test/SKILL.md
+│   ├── android-debug/SKILL.md
+│   ├── android-install/SKILL.md
+│   └── android-device/SKILL.md
+├── .claude-plugin/plugin.json       # Claude Code plugin manifest
+├── CLAUDE.md                        # ADB knowledge base for Claude Code
+├── AGENTS.md                        # Instructions for Codex
+├── .cursor/rules/android-adb.mdc   # Rules for Cursor
+├── .github/copilot-instructions.md # Instructions for GitHub Copilot
+├── .gitignore
+├── LICENSE
+└── README.md
 ```
 
 ## License

@@ -1,4 +1,5 @@
 ---
+name: android
 description: Control an Android device or emulator via ADB
 allowed-tools: Bash(adb:*), Bash(emulator:*), Read, Glob
 argument-hint: what you want to do (e.g., "take a screenshot", "tap the Login button", "open Settings")

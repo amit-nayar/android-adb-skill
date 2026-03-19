@@ -1,4 +1,5 @@
 ---
+name: android-debug
 description: Debug an Android app using logcat and device diagnostics
 allowed-tools: Bash(adb:*), Read
 argument-hint: "what to debug (e.g., 'crashes in com.myapp', 'ANR after tapping Settings', 'network errors')"

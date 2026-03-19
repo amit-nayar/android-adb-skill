@@ -1,4 +1,5 @@
 ---
+name: android-device
 description: Manage Android devices and emulators
 allowed-tools: Bash(adb:*), Bash(emulator:*), Read
 argument-hint: "[optional] action (e.g., 'list', 'start Pixel_7_API_34', 'info')"

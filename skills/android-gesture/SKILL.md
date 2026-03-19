@@ -1,4 +1,5 @@
 ---
+name: android-gesture
 description: Perform gestures on an Android device (swipe, long press, double tap)
 allowed-tools: Bash(adb:*), Read
 argument-hint: "gesture to perform (e.g., 'swipe left', 'long press the icon', 'double tap at 500 800')"

@@ -1,4 +1,5 @@
 ---
+name: android-test
 description: Run an automated test flow on an Android app
 allowed-tools: Bash(adb:*), Read
 argument-hint: "test flow description (e.g., 'login with user@test.com / pass123, verify home screen')"

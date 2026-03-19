@@ -1,4 +1,5 @@
 ---
+name: android-navigate
 description: Navigate to a specific screen on an Android device
 allowed-tools: Bash(adb:*), Read
 argument-hint: "destination (e.g., 'Settings > Account > Privacy', 'home screen', 'com.myapp login page')"

@@ -1,4 +1,5 @@
 ---
+name: android-screenshot
 description: Capture and analyze an Android device screenshot
 allowed-tools: Bash(adb:*), Read
 argument-hint: "[optional] what to look for or where to save"

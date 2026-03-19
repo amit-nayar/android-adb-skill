@@ -1,0 +1,11 @@
+{
+  "name": "android-adb-skill",
+  "version": "1.0.0",
+  "description": "Android device automation via ADB — screenshots, UI inspection, gestures, app management, and debugging",
+  "author": {
+    "name": "Amit",
+    "email": "amit.nyr@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": ["android", "adb", "automation", "testing", "mobile"]
+}

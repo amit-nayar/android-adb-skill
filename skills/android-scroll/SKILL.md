@@ -1,4 +1,5 @@
 ---
+name: android-scroll
 description: Scroll to find an element on an Android device
 allowed-tools: Bash(adb:*), Read
 argument-hint: "element to find (e.g., 'Privacy Policy link', 'Sign Out button')"
