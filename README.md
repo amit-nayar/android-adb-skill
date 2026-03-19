@@ -40,44 +40,98 @@ adb devices
 
 ## Installation
 
-### Claude Code (plugin)
+### Claude Code (plugin — recommended)
+
+Install as a plugin so skills stay up to date and are available across all projects:
 
 ```bash
-# From GitHub
+# Inside Claude Code, run:
 /plugin marketplace add <your-github-username>/android-adb-skill
-
-# Or from a local path during development
-claude --plugin-dir /path/to/android-adb-skill
 ```
 
 Skills become available as `/android-adb-skill:android`, `/android-adb-skill:android-tap`, etc.
 
+For local development, load the plugin from disk:
+
+```bash
+claude --plugin-dir /path/to/android-adb-skill
+```
+
 ### Claude Code (local copy)
+
+If you prefer not to use the plugin system, copy the skill files directly:
 
 ```bash
 # Global (available in all projects)
 cp -r skills/* ~/.claude/skills/
+cp CLAUDE.md ~/.claude/CLAUDE.md
 
-# Project-scoped
+# Or project-scoped
 mkdir -p .claude/skills
 cp -r skills/* .claude/skills/
+cp CLAUDE.md .   # optional: ADB reference loaded into every conversation
 ```
 
-### Codex
+Skills become `/android`, `/android-tap`, etc. (no namespace prefix).
 
-Just clone or copy this repo into your project. Codex automatically reads `AGENTS.md` and can reference the skill files for detailed instructions.
+### OpenAI Codex
+
+Copy `AGENTS.md` and `skills/` into your project root:
+
+```bash
+cp AGENTS.md /path/to/your/project/
+cp -r skills/ /path/to/your/project/skills/
+```
+
+Codex automatically reads `AGENTS.md` on startup. The file references `skills/*/SKILL.md` for detailed step-by-step instructions, which Codex can read on demand.
 
 ### Cursor
 
-Clone or copy this repo into your project. Cursor reads `.cursor/rules/android-adb.mdc` automatically when the rule description matches the conversation context.
+Copy the rules file and skills into your project:
+
+```bash
+mkdir -p /path/to/your/project/.cursor/rules
+cp .cursor/rules/android-adb.mdc /path/to/your/project/.cursor/rules/
+cp -r skills/ /path/to/your/project/skills/
+```
+
+Cursor loads `.cursor/rules/android-adb.mdc` automatically when its description matches the conversation context. The rule references `skills/` for detailed instructions.
 
 ### GitHub Copilot
 
-Clone or copy this repo into your project. Copilot reads `.github/copilot-instructions.md` for context.
+Copy the instructions file and skills into your project:
+
+```bash
+mkdir -p /path/to/your/project/.github
+cp .github/copilot-instructions.md /path/to/your/project/.github/
+cp -r skills/ /path/to/your/project/skills/
+```
+
+Copilot reads `.github/copilot-instructions.md` automatically in Copilot Chat. The file references `skills/` for detailed instructions.
+
+### Windsurf
+
+Windsurf uses a single `.windsurfrules` file. Copy the ADB reference into your project:
+
+```bash
+cp AGENTS.md /path/to/your/project/.windsurfrules
+cp -r skills/ /path/to/your/project/skills/
+```
+
+### Cline / Roo Code
+
+Copy the instructions and skills into your project:
+
+```bash
+cp AGENTS.md /path/to/your/project/.clinerules
+cp -r skills/ /path/to/your/project/skills/
+```
+
+Cline reads `.clinerules` automatically. The file references `skills/` for detailed instructions.
 
 ### Other agents
 
-Point any agent that can read files and run shell commands at `skills/*/SKILL.md`. Each skill file is self-contained markdown with step-by-step instructions.
+Any agent that can read markdown files and run shell commands can use the skills directly. Point the agent at the relevant `skills/*/SKILL.md` file for the task at hand. Each skill is self-contained with step-by-step ADB instructions.
 
 ## Available Skills
 
