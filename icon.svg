@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="#1a1a2e" stroke="#3DDC84" stroke-width="2.5"/>
+
+  <!-- Android head -->
+  <rect x="36" y="42" width="56" height="38" rx="19" fill="#3DDC84"/>
+
+  <!-- Eyes -->
+  <circle cx="50" cy="56" r="3.5" fill="#1a1a2e"/>
+  <circle cx="78" cy="56" r="3.5" fill="#1a1a2e"/>
+
+  <!-- Antennae -->
+  <line x1="48" y1="32" x2="44" y2="24" stroke="#3DDC84" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="80" y1="32" x2="84" y2="24" stroke="#3DDC84" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Terminal cursor / command prompt below head -->
+  <rect x="32" y="84" width="64" height="24" rx="4" fill="#0d1117" stroke="#3DDC84" stroke-width="1.5"/>
+  <text x="38" y="100" font-family="monospace" font-size="13" font-weight="bold" fill="#3DDC84">$ adb _</text>
+</svg>

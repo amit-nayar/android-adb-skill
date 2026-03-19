@@ -1,6 +1,14 @@
-# android-adb-skill
+<p align="center">
+  <img src="icon.svg" alt="android-adb-skill" width="100" height="100">
+</p>
 
-Android device automation via ADB for AI coding agents — screenshots, UI inspection, gestures, app management, and debugging. No MCP server, no dependencies, just ADB.
+<h1 align="center">Android ADB Skill</h1>
+
+<p align="center">
+  Android device automation via ADB for AI coding agents.<br>
+  Screenshots, UI inspection, gestures, app management, and debugging.<br>
+  No MCP server, no dependencies, just ADB.
+</p>
 
 ## What is this?
 
