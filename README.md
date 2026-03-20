@@ -5,6 +5,10 @@
 <h1 align="center">Android ADB Skill</h1>
 
 <p align="center">
+  <a href="https://github.com/amit-nayar/android-adb-skill/actions/workflows/test.yml">
+    <img src="https://github.com/amit-nayar/android-adb-skill/actions/workflows/test.yml/badge.svg" alt="Test">
+  </a>
+  <br>
   Android device automation for AI coding agents.<br>
   Skill-driven orchestration with a local command layer instead of MCP.
 </p>
@@ -17,6 +21,8 @@ This repo packages Android automation for agents in two layers:
 - `skills/*/SKILL.md` are thin task workflows that compose the command layer.
 
 The goal is to keep the agent experience high-level while keeping the runtime contract deterministic and testable.
+
+The repo includes local tests plus GitHub Actions CI for the shared command layer.
 
 ## Why this shape?
 
@@ -99,6 +105,18 @@ Examples:
 
 See [`docs/command-contract.md`](docs/command-contract.md) for the full contract.
 
+## Testing
+
+Run the local test suite with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+CI runs the same suite on every push and pull request via [`.github/workflows/test.yml`](.github/workflows/test.yml).
+
+The tests use fake `adb` and `emulator` binaries, so they do not require a real Android SDK or device on the CI runner.
+
 ## Skills
 
 | Skill | Purpose |
@@ -132,6 +150,8 @@ android-adb-skill/
 │   └── android
 ├── docs/
 │   └── command-contract.md
+├── tests/
+│   └── test_tools_android.py
 ├── skills/
 │   ├── android/SKILL.md
 │   ├── android-screenshot/SKILL.md
@@ -148,6 +168,7 @@ android-adb-skill/
 ├── CLAUDE.md
 ├── .cursor/rules/android-adb.mdc
 ├── .github/copilot-instructions.md
+├── .github/workflows/test.yml
 └── README.md
 ```
 
