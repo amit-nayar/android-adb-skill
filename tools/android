@@ -34,6 +34,9 @@ KEYCODES = {
 }
 
 
+UI_DUMP_RETRIES = 3
+
+
 class ToolError(RuntimeError):
     pass
 
@@ -133,6 +136,10 @@ def adb_bytes(args, *, device_id=None, timeout=10):
     return result.stdout
 
 
+def command_output(result):
+    return "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
+
+
 def parse_devices(output):
     devices = []
     for raw_line in output.splitlines():
@@ -183,6 +190,8 @@ def parse_bounds(bounds_str):
         return None
 
     left, top, right, bottom = [int(group) for group in match.groups()]
+    if right <= left or bottom <= top:
+        return None
     return {
         "x": left,
         "y": top,
@@ -199,19 +208,45 @@ def center_from_bounds(bounds):
 
 
 def get_ui_xml(device_id):
-    primary = adb_result(["shell", "uiautomator", "dump", "/dev/tty"], device_id=device_id, check=False, timeout=20)
-    primary_output = "\n".join(part for part in [primary.stdout, primary.stderr] if part)
-    xml = extract_xml(primary_output)
-    if xml:
-        return xml
+    attempts = []
+    for attempt in range(UI_DUMP_RETRIES):
+        primary = adb_result(["shell", "uiautomator", "dump", "/dev/tty"], device_id=device_id, check=False, timeout=20)
+        primary_output = command_output(primary)
+        xml = extract_xml(primary_output)
+        if xml:
+            return xml
 
-    adb_text(["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"], device_id=device_id, timeout=20)
-    fallback = adb_text(["shell", "cat", "/sdcard/window_dump.xml"], device_id=device_id, timeout=20)
-    xml = extract_xml(fallback)
-    if xml:
-        return xml
+        fallback_dump = adb_result(
+            ["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"],
+            device_id=device_id,
+            check=False,
+            timeout=20,
+        )
+        fallback_cat = adb_result(
+            ["shell", "cat", "/sdcard/window_dump.xml"],
+            device_id=device_id,
+            check=False,
+            timeout=20,
+        )
+        fallback_output = "\n".join(
+            part for part in [command_output(fallback_dump), command_output(fallback_cat)] if part
+        )
+        xml = extract_xml(fallback_output)
+        if xml:
+            return xml
 
-    raise ToolError("Unable to read UI hierarchy from the device.")
+        attempts.append(
+            {
+                "primary": primary_output,
+                "fallback": fallback_output,
+            }
+        )
+        if attempt + 1 < UI_DUMP_RETRIES:
+            time.sleep(0.5)
+
+    last_attempt = attempts[-1] if attempts else {}
+    detail = last_attempt.get("primary") or last_attempt.get("fallback") or "uiautomator dump returned no XML"
+    raise ToolError(f"Unable to read UI hierarchy from the device. Last output: {detail}")
 
 
 def extract_xml(output):
@@ -489,6 +524,18 @@ def cmd_device_avds(args):
     print("\n".join(avds))
 
 
+def select_started_device(current_devices, before_ids, explicit_device=None):
+    ready_ids = {device["id"] for device in current_devices if device["state"] == "device"}
+    if explicit_device:
+        return explicit_device if explicit_device in ready_ids else None
+
+    new_ready = sorted(ready_ids - before_ids)
+    if len(new_ready) > 1:
+        device_lines = "\n".join(f"- {device_id}" for device_id in new_ready)
+        raise ToolError(f"Multiple new devices detected. Re-run with --device.\n{device_lines}")
+    return new_ready[0] if new_ready else None
+
+
 def cmd_device_start(args):
     before_ids = {device["id"] for device in get_devices()}
     subprocess.Popen(
@@ -500,15 +547,11 @@ def cmd_device_start(args):
     deadline = time.time() + args.timeout / 1000.0
     while time.time() < deadline:
         try:
-            if args.device:
-                device_id = args.device
-            else:
-                current_devices = [device for device in get_devices() if device["state"] == "device"]
-                new_devices = [device for device in current_devices if device["id"] not in before_ids]
-                if len(new_devices) == 1:
-                    device_id = new_devices[0]["id"]
-                else:
-                    device_id = choose_device(args.device)
+            current_devices = get_devices()
+            device_id = select_started_device(current_devices, before_ids, explicit_device=args.device)
+            if not device_id:
+                time.sleep(2)
+                continue
             boot = adb_text(["shell", "getprop", "sys.boot_completed"], device_id=device_id, timeout=5).strip()
             if boot == "1":
                 payload = {"deviceId": device_id, "bootCompleted": True}

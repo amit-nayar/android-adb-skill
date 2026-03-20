@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import importlib.util
+from unittest import mock
 from importlib.machinery import SourceFileLoader
 
 
@@ -208,6 +209,8 @@ class AndroidToolTestCase(unittest.TestCase):
 
         cls.png_path = base / "screen.png"
         cls.png_path.write_bytes(png_bytes(320, 640))
+        cls.apk_path = base / "app-debug.apk"
+        cls.apk_path.write_bytes(b"fake-apk")
 
         write_executable(platform_tools / "adb", FAKE_ADB)
         write_executable(emulator_dir / "emulator", FAKE_EMULATOR)
@@ -268,6 +271,13 @@ class AndroidToolTestCase(unittest.TestCase):
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["escaped"], "Hello%sWorld\\!")
 
+    def test_app_install_uses_explicit_package_name(self):
+        proc = self.run_cli("app", "install", "--apk", str(self.apk_path), "--package", "com.example", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["packageName"], "com.example")
+        self.assertEqual(payload["output"], "Success")
+
     def test_multiple_devices_require_explicit_selection(self):
         env = self.base_env()
         env["FAKE_ADB_DEVICES"] = (
@@ -309,11 +319,53 @@ class AndroidToolUnitTestCase(unittest.TestCase):
             {"x": 10, "y": 20, "width": 100, "height": 200},
         )
 
+    def test_parse_bounds_rejects_non_positive_dimensions(self):
+        self.assertIsNone(self.module.parse_bounds("[10,20][10,220]"))
+        self.assertIsNone(self.module.parse_bounds("[10,20][110,20]"))
+
     def test_parse_ui_xml_filters_relevant_nodes(self):
         elements = self.module.parse_ui_xml(SAMPLE_UI_XML)
         self.assertEqual(len(elements), 2)
         self.assertEqual(elements[0]["text"], "Login")
         self.assertTrue(elements[1]["clickable"])
+
+    def test_get_ui_xml_retries_until_xml_is_available(self):
+        responses = iter(
+            [
+                subprocess.CompletedProcess(args=[], returncode=137, stdout="", stderr="Killed"),
+                subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="dump failed"),
+                subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+                subprocess.CompletedProcess(args=[], returncode=0, stdout="UI hierchary dumped to: /dev/tty\n" + SAMPLE_UI_XML, stderr=""),
+            ]
+        )
+
+        with mock.patch.object(self.module, "adb_result", side_effect=lambda *args, **kwargs: next(responses)):
+            with mock.patch.object(self.module.time, "sleep"):
+                xml = self.module.get_ui_xml("emulator-5554")
+
+        self.assertIn("<hierarchy", xml)
+
+    def test_select_started_device_prefers_new_device(self):
+        current_devices = [
+            {"id": "emulator-5554", "state": "device"},
+            {"id": "emulator-5556", "state": "device"},
+        ]
+        self.assertEqual(
+            self.module.select_started_device(current_devices, {"emulator-5554"}),
+            "emulator-5556",
+        )
+
+    def test_select_started_device_ignores_existing_ready_devices(self):
+        current_devices = [{"id": "emulator-5554", "state": "device"}]
+        self.assertIsNone(self.module.select_started_device(current_devices, {"emulator-5554"}))
+
+    def test_select_started_device_requires_explicit_choice_for_multiple_new_devices(self):
+        current_devices = [
+            {"id": "emulator-5554", "state": "device"},
+            {"id": "emulator-5556", "state": "device"},
+        ]
+        with self.assertRaises(self.module.ToolError):
+            self.module.select_started_device(current_devices, set())
 
 
 if __name__ == "__main__":
