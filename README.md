@@ -105,6 +105,16 @@ Examples:
 
 See [`docs/command-contract.md`](docs/command-contract.md) for the full contract.
 
+## Development Workflow
+
+To use this repo as part of an AI-driven Android feature/debug loop, see [`docs/ai-development-workflow.md`](docs/ai-development-workflow.md).
+
+That guide covers:
+
+- how to use this repo from inside an Android app repo
+- how an agent can edit, build, install, navigate, verify, and iterate
+- Mermaid diagrams for the continuous verification loop
+
 ## Testing
 
 Run the local test suite with:
@@ -149,7 +159,8 @@ android-adb-skill/
 ├── tools/
 │   └── android
 ├── docs/
-│   └── command-contract.md
+│   ├── command-contract.md
+│   └── ai-development-workflow.md
 ├── tests/
 │   └── test_tools_android.py
 ├── skills/
