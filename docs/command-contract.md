@@ -50,6 +50,13 @@ Skills and agent adapters should prefer this command surface over raw `adb` call
 ./tools/android input swipe --x1 540 --y1 1800 --x2 540 --y2 600 --duration 300 --json
 ```
 
+#### Headless text input (optional)
+
+If [ADBKeyBoard](https://github.com/senzhk/ADBKeyBoard/releases) is installed on the device,
+`input text` automatically uses its headless IME mode. Text is sent via broadcast intent
+without popping up the soft keyboard, keeping the layout stable and supporting full Unicode.
+The JSON output includes `"method": "ime"` or `"method": "default"` so agents know which path was used.
+
 ### Wait / Scroll
 
 ```bash

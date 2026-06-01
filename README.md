@@ -41,6 +41,7 @@ Compared with a pure markdown skill pack, this structure is better because:
 - Android SDK with `adb` on your PATH or `ANDROID_HOME` set
 - `python3` on your PATH
 - A connected Android device or running emulator
+- (Optional) [ADBKeyBoard](https://github.com/senzhk/ADBKeyBoard/releases) — install once on the device to enable headless text input (no keyboard popup, stable layout, full Unicode support). Without it, `input text` falls back to standard `adb shell input text`.
 
 Quick check:
 
