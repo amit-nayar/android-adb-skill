@@ -42,6 +42,10 @@ class ToolError(RuntimeError):
     pass
 
 
+class DeadlineReached(ToolError):
+    pass
+
+
 def discover_sdk_roots():
     roots = []
     for env_name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
@@ -113,7 +117,7 @@ def run_command(command, *, text=True, check=True, timeout=10):
     except FileNotFoundError as exc:
         raise ToolError(f"Command not found: {command[0]}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise ToolError(f"Command timed out after {timeout}s: {' '.join(command)}") from exc
+        raise ToolError(f"Command timed out after {timeout:.1f}s: {' '.join(command)}") from exc
 
 
 def adb_base(device_id=None):
@@ -164,8 +168,18 @@ def parse_devices(output):
     return devices
 
 
-def get_devices():
-    return parse_devices(adb_text(["devices", "-l"], timeout=10))
+def get_devices(timeout=10):
+    return parse_devices(adb_text(["devices", "-l"], timeout=timeout))
+
+
+def bounded_timeout(deadline, cap):
+    """Per-call timeout that never runs past `deadline` (None means no deadline)."""
+    if deadline is None:
+        return cap
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        raise DeadlineReached("Deadline reached.")
+    return min(cap, remaining)
 
 
 def choose_device(explicit_device=None):
@@ -208,31 +222,57 @@ def center_from_bounds(bounds):
     }
 
 
-def get_ui_xml(device_id):
+def dump_ui_to_file(device_id, deadline):
+    # A unique path per call, removed afterwards, so a failed dump can never be
+    # answered with a file left behind by an earlier or concurrent command.
+    path = f"/data/local/tmp/android-adb-{os.getpid()}-{time.time_ns()}.xml"
+    try:
+        dump = adb_result(
+            ["shell", "uiautomator", "dump", path],
+            device_id=device_id,
+            check=False,
+            timeout=bounded_timeout(deadline, 20),
+        )
+        dump_output = command_output(dump)
+        if dump.returncode != 0 or "dumped to" not in dump_output:
+            return None, dump_output
+        cat = adb_result(["shell", "cat", path], device_id=device_id, check=False, timeout=bounded_timeout(deadline, 20))
+        return extract_xml(command_output(cat)), dump_output
+    finally:
+        # Best-effort cleanup: a leftover file is harmless because every call uses a
+        # new path, and a cleanup error must not hide the dump's own result or error.
+        try:
+            adb_result(["shell", "rm", "-f", path], device_id=device_id, check=False, timeout=bounded_timeout(deadline, 10))
+        except ToolError:
+            pass
+
+
+def get_ui_xml(device_id, deadline=None):
     attempts = []
+    try:
+        return read_ui_xml_with_retries(device_id, deadline, attempts)
+    except DeadlineReached as exc:
+        if not attempts:
+            raise
+        last = attempts[-1]
+        detail = last.get("primary") or last.get("fallback") or "uiautomator dump returned no XML"
+        raise ToolError(f"Unable to read UI hierarchy before the deadline. Last output: {detail}") from exc
+
+
+def read_ui_xml_with_retries(device_id, deadline, attempts):
     for attempt in range(UI_DUMP_RETRIES):
-        primary = adb_result(["shell", "uiautomator", "dump", "/dev/tty"], device_id=device_id, check=False, timeout=20)
+        primary = adb_result(
+            ["shell", "uiautomator", "dump", "/dev/tty"],
+            device_id=device_id,
+            check=False,
+            timeout=bounded_timeout(deadline, 20),
+        )
         primary_output = command_output(primary)
         xml = extract_xml(primary_output)
         if xml:
             return xml
 
-        fallback_dump = adb_result(
-            ["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"],
-            device_id=device_id,
-            check=False,
-            timeout=20,
-        )
-        fallback_cat = adb_result(
-            ["shell", "cat", "/sdcard/window_dump.xml"],
-            device_id=device_id,
-            check=False,
-            timeout=20,
-        )
-        fallback_output = "\n".join(
-            part for part in [command_output(fallback_dump), command_output(fallback_cat)] if part
-        )
-        xml = extract_xml(fallback_output)
+        xml, fallback_output = dump_ui_to_file(device_id, deadline)
         if xml:
             return xml
 
@@ -243,7 +283,7 @@ def get_ui_xml(device_id):
             }
         )
         if attempt + 1 < UI_DUMP_RETRIES:
-            time.sleep(0.5)
+            time.sleep(min(0.5, bounded_timeout(deadline, 0.5)))
 
     last_attempt = attempts[-1] if attempts else {}
     detail = last_attempt.get("primary") or last_attempt.get("fallback") or "uiautomator dump returned no XML"
@@ -385,9 +425,18 @@ def shell_quote_input_text(segment):
     return "'" + segment.replace(" ", "%s").replace("'", "'\\''") + "'"
 
 
+def effective_wm_value(output, pattern):
+    """Return the Override value from `wm size`/`wm density` output, else the Physical one."""
+    override = re.search(r"Override \w+:\s*" + pattern, output)
+    if override:
+        return override
+    return re.search(pattern, output)
+
+
 def get_screen_size(device_id):
+    # Input and UI-dump coordinates follow the override size when one is set.
     output = adb_text(["shell", "wm", "size"], device_id=device_id, timeout=10)
-    match = re.search(r"(\d+)x(\d+)", output)
+    match = effective_wm_value(output, r"(\d+)x(\d+)")
     if not match:
         raise ToolError(f"Could not parse screen size from: {output.strip()}")
     return int(match.group(1)), int(match.group(2))
@@ -422,8 +471,8 @@ def get_device_info(device_id):
     for key, command in fields.items():
         info[key] = adb_text(command, device_id=device_id, timeout=10).strip()
 
-    size_match = re.search(r"(\d+x\d+)", info["screenSize"])
-    density_match = re.search(r"(\d+)", info["density"])
+    size_match = effective_wm_value(info["screenSize"], r"(\d+x\d+)")
+    density_match = effective_wm_value(info["density"], r"(\d+)")
     info["screenSize"] = size_match.group(1) if size_match else info["screenSize"]
     info["density"] = density_match.group(1) if density_match else info["density"]
     return info
@@ -462,8 +511,17 @@ def detect_package_from_apk(apk_path):
 
 
 def get_app_pids(device_id, package_name):
-    result = adb_result(["shell", "pidof", package_name], device_id=device_id, check=False, timeout=10)
-    return [pid for pid in (result.stdout or "").split() if pid]
+    """PIDs of every process of the app, including secondary ones such as "pkg:remote"."""
+    output = adb_text(["shell", "ps", "-A", "-o", "PID,NAME"], device_id=device_id, timeout=10)
+    pids = []
+    for line in output.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, name = parts
+        if name == package_name or name.startswith(package_name + ":"):
+            pids.append(pid)
+    return pids
 
 
 def get_logs(device_id, package_name=None, level=None, lines=200, since=None):
@@ -507,8 +565,8 @@ def ensure_package_installed(device_id, package_name):
         raise ToolError(f"Package {package_name} is not installed on {device_id}.")
 
 
-def is_device_ready(device_id):
-    return any(device["id"] == device_id and device["state"] == "device" for device in get_devices())
+def is_device_ready(device_id, timeout=10):
+    return any(device["id"] == device_id and device["state"] == "device" for device in get_devices(timeout))
 
 
 def print_output(payload, as_json):
@@ -670,8 +728,8 @@ def cmd_screenshot(args):
         print(f"Dimensions: {payload['width']}x{payload['height']}")
 
 
-def load_ui_elements(device_id):
-    xml = get_ui_xml(device_id)
+def load_ui_elements(device_id, deadline=None):
+    xml = get_ui_xml(device_id, deadline)
     return xml, parse_ui_xml(xml)
 
 
@@ -816,10 +874,14 @@ def cmd_wait_element(args):
     last_error = None
     while time.time() < deadline:
         try:
-            _, elements = load_ui_elements(device_id)
+            _, elements = load_ui_elements(device_id, deadline)
         except ToolError as exc:
+            if time.time() >= deadline:
+                if not isinstance(exc, DeadlineReached):
+                    last_error = str(exc)
+                break
             # UI dumps fail transiently during animations, but a vanished device never recovers.
-            if not is_device_ready(device_id):
+            if not is_device_ready(device_id, bounded_timeout(deadline, 10)):
                 raise ToolError(f"Device {device_id} is no longer connected. Last error: {exc}") from exc
             last_error = str(exc)
             time.sleep(args.interval / 1000.0)

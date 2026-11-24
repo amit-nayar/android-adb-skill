@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import importlib.util
 from unittest import mock
@@ -49,6 +50,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 
 def load_arg(name, default=""):
@@ -91,6 +93,7 @@ if args == ["exec-out", "screencap", "-p"]:
     sys.exit(0)
 
 if args[:3] == ["shell", "uiautomator", "dump"]:
+    time.sleep(float(load_arg("FAKE_ADB_UI_DELAY", "0") or "0"))
     xml = current_ui_xml()
     if args[3] == "/dev/tty":
         if load_arg("FAKE_ADB_UI_TTY_FAIL") == "1" or load_arg("FAKE_ADB_UI_FAIL") == "1":
@@ -99,15 +102,23 @@ if args[:3] == ["shell", "uiautomator", "dump"]:
         sys.stdout.write("UI hierchary dumped to: /dev/tty\n")
         sys.stdout.write(xml)
         sys.exit(0)
-    if args[3] == "/sdcard/window_dump.xml":
-        sys.stdout.write("UI hierchary dumped to: /sdcard/window_dump.xml\n")
-        sys.exit(0)
-
-if args == ["shell", "cat", "/sdcard/window_dump.xml"]:
     if load_arg("FAKE_ADB_UI_FAIL") == "1":
-        sys.stderr.write("cat: /sdcard/window_dump.xml: No such file or directory\n")
+        # uiautomator reports this failure on stdout and still exits 0.
+        sys.stdout.write("ERROR: null root node returned by UiTestAutomationBridge.\n")
+        sys.exit(0)
+    sys.stdout.write("UI hierchary dumped to: " + args[3] + "\n")
+    sys.exit(0)
+
+if args[:2] == ["shell", "cat"] and args[2].endswith(".xml"):
+    # FAKE_ADB_STALE_UI_XML simulates a dump file left behind by an earlier command.
+    stale = load_arg("FAKE_ADB_STALE_UI_XML")
+    if load_arg("FAKE_ADB_UI_FAIL") == "1" and not stale:
+        sys.stderr.write("cat: " + args[2] + ": No such file or directory\n")
         sys.exit(1)
-    sys.stdout.write(current_ui_xml())
+    sys.stdout.write(stale if load_arg("FAKE_ADB_UI_FAIL") == "1" else current_ui_xml())
+    sys.exit(0)
+
+if args[:3] == ["shell", "rm", "-f"]:
     sys.exit(0)
 
 if args == ["shell", "wm", "size"]:
@@ -201,8 +212,12 @@ if args[:2] == ["logcat", "-d"]:
     sys.stdout.write(load_arg("FAKE_ADB_LOGCAT", "03-20 12:00:00.000  1234  1234 E Example: boom\n"))
     sys.exit(0)
 
-if args[:2] == ["shell", "pidof"]:
-    sys.stdout.write(load_arg("FAKE_ADB_PIDOF", "1234\n"))
+if args == ["shell", "ps", "-A", "-o", "PID,NAME"]:
+    sys.stdout.write(
+        "  PID NAME\n"
+        "    1 init\n"
+        + load_arg("FAKE_ADB_PS", " 1234 com.example\n 5678 com.example.other\n")
+    )
     sys.exit(0)
 
 if args[:2] == ["install", "-r"]:
@@ -551,9 +566,57 @@ class AndroidToolTestCase(unittest.TestCase):
         logcat = [call for call in self.adb_calls(env) if call[:1] == ["logcat"]]
         self.assertNotIn("-t", logcat[0])
 
+    def test_debug_logs_includes_secondary_processes(self):
+        env = self.base_env()
+        env["FAKE_ADB_PS"] = " 4321 com.example:remote\n 5678 com.example.other\n"
+        env["FAKE_ADB_LOGCAT"] = (
+            "03-20 12:00:00.000  4321  4321 E Remote: from remote\n"
+            "03-20 12:00:00.000  5678  5678 E Other: other package\n"
+        )
+        proc = self.run_cli("debug", "logs", "--package", "com.example", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(len(payload["lines"]), 1)
+        self.assertIn("from remote", payload["lines"][0])
+
+    def test_ui_dump_ignores_stale_dump_file(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_FAIL"] = "1"
+        env["FAKE_ADB_STALE_UI_XML"] = SAMPLE_UI_XML
+        proc = self.run_cli("ui", "find", "--by", "text", "--value", "Login", "--json", env=env)
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("Unable to read UI hierarchy", json.loads(proc.stderr)["error"])
+
+    def test_wait_element_timeout_bounds_slow_ui_dumps(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_DELAY"] = "5"
+        start = time.time()
+        proc = self.run_cli("wait", "element", "--by", "text", "--value", "Login", "--timeout", "1000", "--json", env=env)
+        elapsed = time.time() - start
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("did not appear within 1000ms", json.loads(proc.stderr)["error"])
+        self.assertLess(elapsed, 4)
+
+    def test_scroll_uses_override_display_size(self):
+        env = self.logged_env("scroll-override")
+        env["FAKE_ADB_WM_SIZE"] = "Physical size: 1080x2400\nOverride size: 720x1600\n"
+        proc = self.run_cli("scroll", "find", "--by", "text", "--value", "Missing", "--pause", "0", "--json", env=env)
+        self.assertEqual(proc.returncode, 1)
+        swipes = [call for call in self.adb_calls(env) if call[:3] == ["shell", "input", "swipe"]]
+        self.assertEqual(swipes[0][3:7], ["360", "1200", "360", "400"])
+
+    def test_device_info_reports_override_size_and_density(self):
+        env = self.base_env()
+        env["FAKE_ADB_WM_SIZE"] = "Physical size: 1080x2400\nOverride size: 720x1600\n"
+        env["FAKE_ADB_WM_DENSITY"] = "Physical density: 440\nOverride density: 320\n"
+        proc = self.run_cli("device", "info", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual((payload["screenSize"], payload["density"]), ("720x1600", "320"))
+
     def test_debug_logs_fails_when_package_not_running(self):
         env = self.base_env()
-        env["FAKE_ADB_PIDOF"] = ""
+        env["FAKE_ADB_PS"] = " 5678 com.example.other\n"
         proc = self.run_cli("debug", "logs", "--package", "com.example", "--json", env=env)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("is not running", json.loads(proc.stderr)["error"])
