@@ -35,9 +35,14 @@ KEYCODES = {
 
 
 UI_DUMP_RETRIES = 3
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class ToolError(RuntimeError):
+    pass
+
+
+class DeadlineReached(ToolError):
     pass
 
 
@@ -112,7 +117,7 @@ def run_command(command, *, text=True, check=True, timeout=10):
     except FileNotFoundError as exc:
         raise ToolError(f"Command not found: {command[0]}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise ToolError(f"Command timed out after {timeout}s: {' '.join(command)}") from exc
+        raise ToolError(f"Command timed out after {timeout:.1f}s: {' '.join(command)}") from exc
 
 
 def adb_base(device_id=None):
@@ -163,8 +168,18 @@ def parse_devices(output):
     return devices
 
 
-def get_devices():
-    return parse_devices(adb_text(["devices", "-l"], timeout=10))
+def get_devices(timeout=10):
+    return parse_devices(adb_text(["devices", "-l"], timeout=timeout))
+
+
+def bounded_timeout(deadline, cap):
+    """Per-call timeout that never runs past `deadline` (None means no deadline)."""
+    if deadline is None:
+        return cap
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        raise DeadlineReached("Deadline reached.")
+    return min(cap, remaining)
 
 
 def choose_device(explicit_device=None):
@@ -207,31 +222,57 @@ def center_from_bounds(bounds):
     }
 
 
-def get_ui_xml(device_id):
+def dump_ui_to_file(device_id, deadline):
+    # A unique path per call, removed afterwards, so a failed dump can never be
+    # answered with a file left behind by an earlier or concurrent command.
+    path = f"/data/local/tmp/android-adb-{os.getpid()}-{time.time_ns()}.xml"
+    try:
+        dump = adb_result(
+            ["shell", "uiautomator", "dump", path],
+            device_id=device_id,
+            check=False,
+            timeout=bounded_timeout(deadline, 20),
+        )
+        dump_output = command_output(dump)
+        if dump.returncode != 0 or "dumped to" not in dump_output:
+            return None, dump_output
+        cat = adb_result(["shell", "cat", path], device_id=device_id, check=False, timeout=bounded_timeout(deadline, 20))
+        return extract_xml(command_output(cat)), dump_output
+    finally:
+        # Best-effort cleanup: a leftover file is harmless because every call uses a
+        # new path, and a cleanup error must not hide the dump's own result or error.
+        try:
+            adb_result(["shell", "rm", "-f", path], device_id=device_id, check=False, timeout=bounded_timeout(deadline, 10))
+        except ToolError:
+            pass
+
+
+def get_ui_xml(device_id, deadline=None):
     attempts = []
+    try:
+        return read_ui_xml_with_retries(device_id, deadline, attempts)
+    except DeadlineReached as exc:
+        if not attempts:
+            raise
+        last = attempts[-1]
+        detail = last.get("primary") or last.get("fallback") or "uiautomator dump returned no XML"
+        raise ToolError(f"Unable to read UI hierarchy before the deadline. Last output: {detail}") from exc
+
+
+def read_ui_xml_with_retries(device_id, deadline, attempts):
     for attempt in range(UI_DUMP_RETRIES):
-        primary = adb_result(["shell", "uiautomator", "dump", "/dev/tty"], device_id=device_id, check=False, timeout=20)
+        primary = adb_result(
+            ["shell", "uiautomator", "dump", "/dev/tty"],
+            device_id=device_id,
+            check=False,
+            timeout=bounded_timeout(deadline, 20),
+        )
         primary_output = command_output(primary)
         xml = extract_xml(primary_output)
         if xml:
             return xml
 
-        fallback_dump = adb_result(
-            ["shell", "uiautomator", "dump", "/sdcard/window_dump.xml"],
-            device_id=device_id,
-            check=False,
-            timeout=20,
-        )
-        fallback_cat = adb_result(
-            ["shell", "cat", "/sdcard/window_dump.xml"],
-            device_id=device_id,
-            check=False,
-            timeout=20,
-        )
-        fallback_output = "\n".join(
-            part for part in [command_output(fallback_dump), command_output(fallback_cat)] if part
-        )
-        xml = extract_xml(fallback_output)
+        xml, fallback_output = dump_ui_to_file(device_id, deadline)
         if xml:
             return xml
 
@@ -242,7 +283,7 @@ def get_ui_xml(device_id):
             }
         )
         if attempt + 1 < UI_DUMP_RETRIES:
-            time.sleep(0.5)
+            time.sleep(min(0.5, bounded_timeout(deadline, 0.5)))
 
     last_attempt = attempts[-1] if attempts else {}
     detail = last_attempt.get("primary") or last_attempt.get("fallback") or "uiautomator dump returned no XML"
@@ -273,7 +314,8 @@ def parse_ui_xml(xml_text):
         bounds = parse_bounds(node.attrib.get("bounds", ""))
         if not bounds:
             continue
-        if not (resource_id or text or content_desc or clickable):
+        scrollable = node.attrib.get("scrollable") == "true"
+        if not (resource_id or text or content_desc or clickable or scrollable):
             continue
 
         elements.append(
@@ -289,38 +331,43 @@ def parse_ui_xml(xml_text):
                 "enabled": node.attrib.get("enabled") == "true",
                 "focused": node.attrib.get("focused") == "true",
                 "checked": node.attrib.get("checked") == "true",
-                "scrollable": node.attrib.get("scrollable") == "true",
+                "scrollable": scrollable,
             }
         )
     return elements
 
 
-def match_element(element, by, value):
-    lowered = value.lower()
+SELECTOR_FIELDS = {
+    "resource-id": "resourceId",
+    "text": "text",
+    "content-desc": "contentDesc",
+}
+
+
+def match_element(element, by, value, exact=False):
+    if by not in SELECTOR_FIELDS:
+        raise ToolError(f"Unsupported selector: {by}")
+    candidate = element[SELECTOR_FIELDS[by]]
     if by == "resource-id":
-        resource_id = element["resourceId"]
-        return resource_id == value or resource_id.endswith(f":id/{value}") or resource_id.endswith(f"/{value}")
-    if by == "text":
-        return lowered in element["text"].lower()
-    if by == "content-desc":
-        return lowered in element["contentDesc"].lower()
-    raise ToolError(f"Unsupported selector: {by}")
+        return candidate == value or candidate.endswith(f":id/{value}") or candidate.endswith(f"/{value}")
+    if exact:
+        return candidate == value
+    return value.lower() in candidate.lower()
 
 
 def element_score(element, by, value):
-    score = 0
-    candidate = {
-        "resource-id": element["resourceId"],
-        "text": element["text"],
-        "content-desc": element["contentDesc"],
-    }[by]
+    candidate = element[SELECTOR_FIELDS[by]]
 
+    # Match quality must outweigh the clickable/enabled bonuses (max 5), so an
+    # exact label is never beaten by a partial match on a clickable element.
     if candidate == value:
-        score += 10
+        score = 20
     elif candidate.endswith(f":id/{value}") or candidate.endswith(f"/{value}"):
-        score += 8
-    elif value.lower() in candidate.lower():
-        score += 5
+        score = 15
+    elif candidate.lower() == value.lower():
+        score = 12
+    else:
+        score = 5
 
     if element["clickable"]:
         score += 3
@@ -329,38 +376,67 @@ def element_score(element, by, value):
     return score
 
 
-def find_elements(elements, by, value):
-    matches = [element for element in elements if match_element(element, by, value)]
+def find_elements(elements, by, value, exact=False):
+    matches = [element for element in elements if match_element(element, by, value, exact)]
     matches.sort(key=lambda item: element_score(item, by, value), reverse=True)
     return matches
 
 
-def escape_input_text(text):
-    escaped = []
-    replacements = {
-        " ": "%s",
-        "\\": "\\\\",
-        "'": "\\'",
-        '"': '\\"',
-        "`": "\\`",
-        "$": "\\$",
-        "&": "\\&",
-        "|": "\\|",
-        ";": "\\;",
-        "(": "\\(",
-        ")": "\\)",
-        "<": "\\<",
-        ">": "\\>",
-        "!": "\\!",
-    }
-    for char in text:
-        escaped.append(replacements.get(char, char))
-    return "".join(escaped)
+TEXT_KEYS = {"\n": "enter", "\t": "tab"}
+
+
+def plan_text_input(text):
+    """Split text into `input text` segments and key presses.
+
+    `input text` turns every "%s" into a space and cannot type newlines or
+    non-ASCII characters, so a literal "%s" is split across two segments and
+    newlines/tabs become key events.
+    """
+    if not text:
+        raise ToolError("--text must not be empty.")
+    unsupported = sorted({char for char in text if char not in TEXT_KEYS and not (" " <= char <= "~")})
+    if unsupported:
+        listed = " ".join(repr(char) for char in unsupported)
+        raise ToolError(
+            f"adb input text only supports printable ASCII, newline and tab. Unsupported characters: {listed}"
+        )
+
+    steps = []
+    segment = ""
+    for index, char in enumerate(text):
+        if char in TEXT_KEYS:
+            if segment:
+                steps.append({"text": segment})
+                segment = ""
+            steps.append({"key": TEXT_KEYS[char]})
+            continue
+        segment += char
+        if char == "%" and text[index + 1 : index + 2] == "s":
+            steps.append({"text": segment})
+            segment = ""
+    if segment:
+        steps.append({"text": segment})
+    return steps
+
+
+def shell_quote_input_text(segment):
+    # adb joins arguments into one device shell command line, so quote for sh.
+    # Spaces become %s because `input text` splits on them on older Android.
+    return "'" + segment.replace(" ", "%s").replace("'", "'\\''") + "'"
+
+
+def effective_wm_value(output, pattern):
+    """Return the Override value from `wm size`/`wm density` output, else the Physical one."""
+    override = re.search(r"Override \w+:\s*" + pattern, output)
+    if override:
+        return override
+    return re.search(pattern, output)
 
 
 def get_screen_size(device_id):
+    # Input and UI-dump coordinates follow the override size when one is set.
     output = adb_text(["shell", "wm", "size"], device_id=device_id, timeout=10)
-    match = re.search(r"(\d+)x(\d+)", output)
+    match = effective_wm_value(output, r"(\d+)x(\d+)")
     if not match:
         raise ToolError(f"Could not parse screen size from: {output.strip()}")
     return int(match.group(1)), int(match.group(2))
@@ -395,8 +471,8 @@ def get_device_info(device_id):
     for key, command in fields.items():
         info[key] = adb_text(command, device_id=device_id, timeout=10).strip()
 
-    size_match = re.search(r"(\d+x\d+)", info["screenSize"])
-    density_match = re.search(r"(\d+)", info["density"])
+    size_match = effective_wm_value(info["screenSize"], r"(\d+x\d+)")
+    density_match = effective_wm_value(info["density"], r"(\d+)")
     info["screenSize"] = size_match.group(1) if size_match else info["screenSize"]
     info["density"] = density_match.group(1) if density_match else info["density"]
     return info
@@ -434,30 +510,63 @@ def detect_package_from_apk(apk_path):
     return None
 
 
+def get_app_pids(device_id, package_name):
+    """PIDs of every process of the app, including secondary ones such as "pkg:remote"."""
+    output = adb_text(["shell", "ps", "-A", "-o", "PID,NAME"], device_id=device_id, timeout=10)
+    pids = []
+    for line in output.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, name = parts
+        if name == package_name or name.startswith(package_name + ":"):
+            pids.append(pid)
+    return pids
+
+
 def get_logs(device_id, package_name=None, level=None, lines=200, since=None):
+    pids = None
+    if package_name:
+        pids = set(get_app_pids(device_id, package_name))
+        if not pids:
+            raise ToolError(
+                f"{package_name} is not running, so its logs cannot be filtered by process. "
+                "Logs from an exited process (for example a crash) are still in the buffer: "
+                "omit --package and use --level E or --since instead."
+            )
+
     args = ["logcat", "-d"]
     if since:
         args.extend(["-T", since])
-    else:
+    elif pids is None:
         args.extend(["-t", str(lines)])
     if level:
         args.append(f"*:{level.upper()}")
 
-    output = adb_text(args, device_id=device_id, timeout=20)
+    output = adb_text(args, device_id=device_id, timeout=30)
+    if pids is None:
+        return output
 
-    if package_name:
-        pid_result = adb_result(["shell", "pidof", package_name], device_id=device_id, check=False, timeout=10)
-        pids = [pid for pid in (pid_result.stdout or "").split() if pid]
-        if pids:
-            pid_set = set(pids)
-            filtered = []
-            for line in output.splitlines():
-                match = re.match(r"^\S+\s+\S+\s+(\d+)\s", line)
-                if match and match.group(1) in pid_set:
-                    filtered.append(line)
-            output = "\n".join(filtered)
+    # Filter by every process of the app (multi-process apps have several), then
+    # apply the line limit, so the limit counts the app's lines, not the device's.
+    filtered = []
+    for line in output.splitlines():
+        match = re.match(r"^\S+\s+\S+\s+(\d+)\s", line)
+        if match and match.group(1) in pids:
+            filtered.append(line)
+    if not since:
+        filtered = filtered[-lines:]
+    return "\n".join(filtered)
 
-    return output
+
+def ensure_package_installed(device_id, package_name):
+    result = adb_result(["shell", "pm", "path", package_name], device_id=device_id, check=False, timeout=10)
+    if "package:" not in (result.stdout or ""):
+        raise ToolError(f"Package {package_name} is not installed on {device_id}.")
+
+
+def is_device_ready(device_id, timeout=10):
+    return any(device["id"] == device_id and device["state"] == "device" for device in get_devices(timeout))
 
 
 def print_output(payload, as_json):
@@ -536,31 +645,58 @@ def select_started_device(current_devices, before_ids, explicit_device=None):
     return new_ready[0] if new_ready else None
 
 
+def read_tail(path, max_lines=20):
+    try:
+        lines = pathlib.Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
 def cmd_device_start(args):
     before_ids = {device["id"] for device in get_devices()}
-    subprocess.Popen(
-        [EMULATOR_PATH, "-avd", args.avd_name, "-no-snapshot-load"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+    log_handle = tempfile.NamedTemporaryFile(
+        prefix=f"emulator-{args.avd_name}-", suffix=".log", delete=False
     )
+    log_path = log_handle.name
+    try:
+        process = subprocess.Popen(
+            [EMULATOR_PATH, "-avd", args.avd_name, "-no-snapshot-load"],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise ToolError(f"Command not found: {EMULATOR_PATH}") from exc
+    finally:
+        log_handle.close()
+
     deadline = time.time() + args.timeout / 1000.0
+    last_error = None
     while time.time() < deadline:
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise ToolError(
+                f"Emulator {args.avd_name} exited with code {exit_code} before booting. "
+                f"Log: {log_path}\n{read_tail(log_path)}"
+            )
         try:
             current_devices = get_devices()
             device_id = select_started_device(current_devices, before_ids, explicit_device=args.device)
-            if not device_id:
-                time.sleep(2)
-                continue
-            boot = adb_text(["shell", "getprop", "sys.boot_completed"], device_id=device_id, timeout=5).strip()
-            if boot == "1":
-                payload = {"deviceId": device_id, "bootCompleted": True}
-                print_output(payload, args.json)
-                return
-        except ToolError:
-            pass
+            if device_id:
+                boot = adb_text(["shell", "getprop", "sys.boot_completed"], device_id=device_id, timeout=5).strip()
+                if boot == "1":
+                    payload = {"deviceId": device_id, "bootCompleted": True, "logPath": log_path}
+                    print_output(payload, args.json)
+                    return
+        except ToolError as exc:
+            # adb errors are expected while the emulator is still coming up.
+            last_error = str(exc)
         time.sleep(2)
-    raise ToolError(f"Emulator {args.avd_name} did not finish booting within {args.timeout}ms.")
+    detail = f" Last adb error: {last_error}" if last_error else ""
+    raise ToolError(
+        f"Emulator {args.avd_name} did not finish booting within {args.timeout}ms. Log: {log_path}.{detail}"
+    )
 
 
 def cmd_screenshot(args):
@@ -592,8 +728,8 @@ def cmd_screenshot(args):
         print(f"Dimensions: {payload['width']}x{payload['height']}")
 
 
-def load_ui_elements(device_id):
-    xml = get_ui_xml(device_id)
+def load_ui_elements(device_id, deadline=None):
+    xml = get_ui_xml(device_id, deadline)
     return xml, parse_ui_xml(xml)
 
 
@@ -625,10 +761,10 @@ def cmd_ui_dump(args):
 def cmd_ui_find(args):
     device_id = choose_device(args.device)
     _, elements = load_ui_elements(device_id)
-    matches = find_elements(elements, args.by, args.value)
+    matches = find_elements(elements, args.by, args.value, args.exact)
     payload = {
         "deviceId": device_id,
-        "selector": {"by": args.by, "value": args.value},
+        "selector": selector_payload(args),
         "count": len(matches),
         "bestMatch": matches[0] if matches else None,
         "matches": matches,
@@ -654,12 +790,26 @@ def cmd_input_tap(args):
 
 def cmd_input_text(args):
     device_id = choose_device(args.device)
-    escaped = escape_input_text(args.text)
-    adb_text(["shell", "input", "text", escaped], device_id=device_id, timeout=10)
+    steps = plan_text_input(args.text)
+    for step in steps:
+        if "key" in step:
+            adb_text(["shell", "input", "keyevent", str(KEYCODES[step["key"]])], device_id=device_id, timeout=10)
+        else:
+            adb_text(["shell", "input", "text", shell_quote_input_text(step["text"])], device_id=device_id, timeout=10)
     print_output(
-        {"deviceId": device_id, "action": "text", "text": args.text, "escaped": escaped},
+        {"deviceId": device_id, "action": "text", "text": args.text, "steps": steps},
         args.json,
     )
+
+
+def cmd_input_double_tap(args):
+    device_id = choose_device(args.device)
+    # Each `input` call starts a new process on the device, and two separate adb
+    # calls land too far apart to count as a double tap. Run both in one shell,
+    # the second started 100 ms after the first, so the taps arrive close together.
+    tap = f"input tap {args.x} {args.y}"
+    adb_text(["shell", f"{tap} & sleep 0.1; {tap}; wait"], device_id=device_id, timeout=10)
+    print_output({"deviceId": device_id, "x": args.x, "y": args.y, "action": "double-tap"}, args.json)
 
 
 def cmd_input_key(args):
@@ -702,7 +852,7 @@ def cmd_input_swipe(args):
 def cmd_input_tap_element(args):
     device_id = choose_device(args.device)
     _, elements = load_ui_elements(device_id)
-    matches = find_elements(elements, args.by, args.value)
+    matches = find_elements(elements, args.by, args.value, args.exact)
     if not matches:
         raise ToolError(f'No element found for {args.by}="{args.value}"')
     best = matches[0]
@@ -712,53 +862,91 @@ def cmd_input_tap_element(args):
         timeout=10,
     )
     print_output(
-        {"deviceId": device_id, "selector": {"by": args.by, "value": args.value}, "element": best},
+        {"deviceId": device_id, "selector": selector_payload(args), "element": best},
         args.json,
     )
 
 
 def cmd_wait_element(args):
     device_id = choose_device(args.device)
-    deadline = time.time() + args.timeout / 1000.0
+    start = time.time()
+    deadline = start + args.timeout / 1000.0
+    last_error = None
     while time.time() < deadline:
         try:
-            _, elements = load_ui_elements(device_id)
-        except ToolError:
+            _, elements = load_ui_elements(device_id, deadline)
+        except ToolError as exc:
+            if time.time() >= deadline:
+                if not isinstance(exc, DeadlineReached):
+                    last_error = str(exc)
+                break
+            # UI dumps fail transiently during animations, but a vanished device never recovers.
+            if not is_device_ready(device_id, bounded_timeout(deadline, 10)):
+                raise ToolError(f"Device {device_id} is no longer connected. Last error: {exc}") from exc
+            last_error = str(exc)
             time.sleep(args.interval / 1000.0)
             continue
-        matches = find_elements(elements, args.by, args.value)
+        last_error = None
+        matches = find_elements(elements, args.by, args.value, args.exact)
         if matches:
-            elapsed = int((time.time() - (deadline - args.timeout / 1000.0)) * 1000)
             print_output(
                 {
                     "deviceId": device_id,
-                    "selector": {"by": args.by, "value": args.value},
-                    "elapsedMs": elapsed,
+                    "selector": selector_payload(args),
+                    "elapsedMs": int((time.time() - start) * 1000),
                     "element": matches[0],
                 },
                 args.json,
             )
             return
         time.sleep(args.interval / 1000.0)
-    raise ToolError(f'Element {args.by}="{args.value}" did not appear within {args.timeout}ms.')
+    detail = f" The last UI dump failed: {last_error}" if last_error else ""
+    raise ToolError(f'Element {args.by}="{args.value}" did not appear within {args.timeout}ms.{detail}')
+
+
+def scroll_swipe(area, direction):
+    """Return swipe start/end points that reveal content in `direction` within `area`."""
+    left, top = area["x"], area["y"]
+    width, height = area["width"], area["height"]
+    center_x = left + round(width / 2)
+    center_y = top + round(height / 2)
+    near_y, far_y = top + round(height * 0.25), top + round(height * 0.75)
+    near_x, far_x = left + round(width * 0.25), left + round(width * 0.75)
+    # Revealing content below means dragging the finger up, and so on.
+    return {
+        "down": (center_x, far_y, center_x, near_y),
+        "up": (center_x, near_y, center_x, far_y),
+        "right": (far_x, center_y, near_x, center_y),
+        "left": (near_x, center_y, far_x, center_y),
+    }[direction]
+
+
+def resolve_scroll_area(device_id, elements, args):
+    if not args.container_by:
+        width, height = get_screen_size(device_id)
+        return {"x": 0, "y": 0, "width": width, "height": height}
+    containers = find_elements(elements, args.container_by, args.container_value, exact=False)
+    if not containers:
+        raise ToolError(f'No scroll container found for {args.container_by}="{args.container_value}"')
+    return containers[0]["bounds"]
 
 
 def cmd_scroll_find(args):
+    if bool(args.container_by) != bool(args.container_value):
+        raise ToolError("Pass --container-by and --container-value together.")
     device_id = choose_device(args.device)
-    width, height = get_screen_size(device_id)
-    center_x = round(width / 2)
-    from_y = round(height * 0.75)
-    to_y = round(height * 0.25)
     previous_signature = None
+    area = None
 
     for scroll_count in range(args.max_scrolls + 1):
         _, elements = load_ui_elements(device_id)
-        matches = find_elements(elements, args.by, args.value)
+        matches = find_elements(elements, args.by, args.value, args.exact)
         if matches:
             print_output(
                 {
                     "deviceId": device_id,
-                    "selector": {"by": args.by, "value": args.value},
+                    "selector": selector_payload(args),
+                    "direction": args.direction,
                     "scrolls": scroll_count,
                     "element": matches[0],
                 },
@@ -774,14 +962,17 @@ def cmd_scroll_find(args):
             break
         previous_signature = signature
 
+        if area is None:
+            area = resolve_scroll_area(device_id, elements, args)
+        x1, y1, x2, y2 = scroll_swipe(area, args.direction)
         adb_text(
-            ["shell", "input", "swipe", str(center_x), str(from_y), str(center_x), str(to_y), str(args.duration)],
+            ["shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(args.duration)],
             device_id=device_id,
             timeout=10,
         )
         time.sleep(args.pause / 1000.0)
 
-    raise ToolError(f'Element {args.by}="{args.value}" was not found after scrolling.')
+    raise ToolError(f'Element {args.by}="{args.value}" was not found after scrolling {args.direction}.')
 
 
 def cmd_app_install(args):
@@ -819,6 +1010,32 @@ def cmd_app_launch(args):
     print_output(payload, args.json)
 
 
+def cmd_app_stop(args):
+    device_id = choose_device(args.device)
+    ensure_package_installed(device_id, args.package)
+    adb_text(["shell", "am", "force-stop", args.package], device_id=device_id, timeout=10)
+    print_output({"deviceId": device_id, "packageName": args.package, "action": "stop"}, args.json)
+
+
+def cmd_app_clear_data(args):
+    device_id = choose_device(args.device)
+    ensure_package_installed(device_id, args.package)
+    result = adb_result(["shell", "pm", "clear", args.package], device_id=device_id, check=False, timeout=30)
+    output = command_output(result)
+    if "Success" not in output:
+        raise ToolError(f"Failed to clear data for {args.package}: {output}")
+    print_output({"deviceId": device_id, "packageName": args.package, "action": "clear-data"}, args.json)
+
+
+def cmd_app_uninstall(args):
+    device_id = choose_device(args.device)
+    result = adb_result(["uninstall", args.package], device_id=device_id, check=False, timeout=60)
+    output = command_output(result)
+    if "Success" not in output:
+        raise ToolError(f"Failed to uninstall {args.package}: {output}")
+    print_output({"deviceId": device_id, "packageName": args.package, "action": "uninstall"}, args.json)
+
+
 def cmd_app_current(args):
     device_id = choose_device(args.device)
     payload = {"deviceId": device_id, **get_current_activity(device_id)}
@@ -853,13 +1070,54 @@ def cmd_debug_clear_logs(args):
     print_output({"deviceId": device_id, "cleared": True}, args.json)
 
 
+def guide_paths():
+    guides = {"contract": REPO_ROOT / "docs" / "command-contract.md"}
+    for skill_file in sorted((REPO_ROOT / "skills").glob("*/SKILL.md")):
+        guides[skill_file.parent.name] = skill_file
+    return guides
+
+
+def cmd_guide(args):
+    guides = guide_paths()
+    if not args.name:
+        print_output({"guides": sorted(guides)}, args.json)
+        return
+    path = guides.get(args.name)
+    if path is None or not path.exists():
+        raise ToolError(f"Unknown guide: {args.name}. Available: {', '.join(sorted(guides))}")
+    text = path.read_text()
+    if args.json:
+        print_output({"name": args.name, "path": str(path), "content": text}, True)
+        return
+    print(text)
+
+
+def selector_payload(args):
+    return {"by": args.by, "value": args.value, "exact": args.exact}
+
+
+def add_selector(parser):
+    parser.add_argument("--by", choices=list(SELECTOR_FIELDS), required=True)
+    parser.add_argument("--value", required=True)
+    parser.add_argument(
+        "--exact",
+        action="store_true",
+        help="Require the whole text or content description to match (case-sensitive) instead of a substring",
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="tools/android",
+        prog="android-adb",
         description="Command-first Android automation helpers for skill-based agents.",
     )
     subparsers = parser.add_subparsers(dest="group")
     subparsers.required = True
+
+    guide = subparsers.add_parser("guide", help="Print the command contract or a skill workflow")
+    guide.add_argument("name", nargs="?", help="Guide to print: contract or a skill name. Omit to list them.")
+    add_common_json(guide)
+    guide.set_defaults(func=cmd_guide)
 
     device = subparsers.add_parser("device", help="Device and emulator commands")
     device_subparsers = device.add_subparsers(dest="action")
@@ -904,8 +1162,7 @@ def build_parser():
     ui_find = ui_subparsers.add_parser("find", help="Find UI elements")
     add_common_device(ui_find)
     add_common_json(ui_find)
-    ui_find.add_argument("--by", choices=["resource-id", "text", "content-desc"], required=True)
-    ui_find.add_argument("--value", required=True)
+    add_selector(ui_find)
     ui_find.set_defaults(func=cmd_ui_find)
 
     input_parser = subparsers.add_parser("input", help="Input commands")
@@ -924,6 +1181,13 @@ def build_parser():
     add_common_json(input_text)
     input_text.add_argument("--text", required=True)
     input_text.set_defaults(func=cmd_input_text)
+
+    input_double_tap = input_subparsers.add_parser("double-tap", help="Double-tap at coordinates")
+    add_common_device(input_double_tap)
+    add_common_json(input_double_tap)
+    input_double_tap.add_argument("--x", type=int, required=True)
+    input_double_tap.add_argument("--y", type=int, required=True)
+    input_double_tap.set_defaults(func=cmd_input_double_tap)
 
     input_key = input_subparsers.add_parser("key", help="Send a key event")
     add_common_device(input_key)
@@ -945,8 +1209,7 @@ def build_parser():
     input_tap_element = input_subparsers.add_parser("tap-element", help="Find and tap an element")
     add_common_device(input_tap_element)
     add_common_json(input_tap_element)
-    input_tap_element.add_argument("--by", choices=["resource-id", "text", "content-desc"], required=True)
-    input_tap_element.add_argument("--value", required=True)
+    add_selector(input_tap_element)
     input_tap_element.set_defaults(func=cmd_input_tap_element)
 
     wait = subparsers.add_parser("wait", help="Wait for UI conditions")
@@ -956,8 +1219,7 @@ def build_parser():
     wait_element = wait_subparsers.add_parser("element", help="Wait for an element to appear")
     add_common_device(wait_element)
     add_common_json(wait_element)
-    wait_element.add_argument("--by", choices=["resource-id", "text", "content-desc"], required=True)
-    wait_element.add_argument("--value", required=True)
+    add_selector(wait_element)
     wait_element.add_argument("--timeout", type=int, default=10000)
     wait_element.add_argument("--interval", type=int, default=500)
     wait_element.set_defaults(func=cmd_wait_element)
@@ -969,8 +1231,19 @@ def build_parser():
     scroll_find = scroll_subparsers.add_parser("find", help="Scroll until an element is visible")
     add_common_device(scroll_find)
     add_common_json(scroll_find)
-    scroll_find.add_argument("--by", choices=["resource-id", "text", "content-desc"], required=True)
-    scroll_find.add_argument("--value", required=True)
+    add_selector(scroll_find)
+    scroll_find.add_argument(
+        "--direction",
+        choices=["down", "up", "left", "right"],
+        default="down",
+        help="Direction of the content to reveal",
+    )
+    scroll_find.add_argument(
+        "--container-by",
+        choices=list(SELECTOR_FIELDS),
+        help="Scroll inside this element instead of the whole screen",
+    )
+    scroll_find.add_argument("--container-value")
     scroll_find.add_argument("--max-scrolls", type=int, default=10)
     scroll_find.add_argument("--duration", type=int, default=500)
     scroll_find.add_argument("--pause", type=int, default=500)
@@ -993,6 +1266,24 @@ def build_parser():
     app_launch.add_argument("--package", required=True)
     app_launch.add_argument("--activity")
     app_launch.set_defaults(func=cmd_app_launch)
+
+    app_stop = app_subparsers.add_parser("stop", help="Force-stop an app")
+    add_common_device(app_stop)
+    add_common_json(app_stop)
+    app_stop.add_argument("--package", required=True)
+    app_stop.set_defaults(func=cmd_app_stop)
+
+    app_clear = app_subparsers.add_parser("clear-data", help="Clear an app's data and cache")
+    add_common_device(app_clear)
+    add_common_json(app_clear)
+    app_clear.add_argument("--package", required=True)
+    app_clear.set_defaults(func=cmd_app_clear_data)
+
+    app_uninstall = app_subparsers.add_parser("uninstall", help="Uninstall an app")
+    add_common_device(app_uninstall)
+    add_common_json(app_uninstall)
+    app_uninstall.add_argument("--package", required=True)
+    app_uninstall.set_defaults(func=cmd_app_uninstall)
 
     app_current = app_subparsers.add_parser("current", help="Get the foreground activity")
     add_common_device(app_current)

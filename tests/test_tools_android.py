@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import importlib.util
 from unittest import mock
@@ -45,9 +46,11 @@ def png_bytes(width: int = 1080, height: int = 2400) -> bytes:
 
 
 FAKE_ADB = r"""#!/usr/bin/env python3
+import json
 import os
 import pathlib
 import sys
+import time
 
 
 def load_arg(name, default=""):
@@ -60,6 +63,26 @@ if args[:2] == ["-s", args[1] if len(args) > 1 else ""]:
     device_id = args[1]
     args = args[2:]
 
+log_path = os.environ.get("FAKE_ADB_LOG")
+if log_path:
+    with open(log_path, "a") as handle:
+        handle.write(json.dumps(args) + "\n")
+
+
+def swipe_count():
+    state = os.environ.get("FAKE_ADB_STATE_DIR")
+    if not state:
+        return 0
+    path = pathlib.Path(state) / "swipes"
+    return int(path.read_text()) if path.exists() else 0
+
+
+def current_ui_xml():
+    needed = int(load_arg("FAKE_ADB_SCROLLS_NEEDED", "0") or "0")
+    if needed and swipe_count() >= needed:
+        return load_arg("FAKE_ADB_UI_XML_SCROLLED")
+    return load_arg("FAKE_ADB_UI_XML")
+
 if args == ["devices", "-l"]:
     sys.stdout.write(load_arg("FAKE_ADB_DEVICES", "List of devices attached\n"))
     sys.exit(0)
@@ -70,20 +93,32 @@ if args == ["exec-out", "screencap", "-p"]:
     sys.exit(0)
 
 if args[:3] == ["shell", "uiautomator", "dump"]:
-    xml = load_arg("FAKE_ADB_UI_XML")
+    time.sleep(float(load_arg("FAKE_ADB_UI_DELAY", "0") or "0"))
+    xml = current_ui_xml()
     if args[3] == "/dev/tty":
-        if load_arg("FAKE_ADB_UI_TTY_FAIL") == "1":
+        if load_arg("FAKE_ADB_UI_TTY_FAIL") == "1" or load_arg("FAKE_ADB_UI_FAIL") == "1":
             sys.stderr.write("ERROR: dump failed\n")
             sys.exit(1)
         sys.stdout.write("UI hierchary dumped to: /dev/tty\n")
         sys.stdout.write(xml)
         sys.exit(0)
-    if args[3] == "/sdcard/window_dump.xml":
-        sys.stdout.write("UI hierchary dumped to: /sdcard/window_dump.xml\n")
+    if load_arg("FAKE_ADB_UI_FAIL") == "1":
+        # uiautomator reports this failure on stdout and still exits 0.
+        sys.stdout.write("ERROR: null root node returned by UiTestAutomationBridge.\n")
         sys.exit(0)
+    sys.stdout.write("UI hierchary dumped to: " + args[3] + "\n")
+    sys.exit(0)
 
-if args == ["shell", "cat", "/sdcard/window_dump.xml"]:
-    sys.stdout.write(load_arg("FAKE_ADB_UI_XML"))
+if args[:2] == ["shell", "cat"] and args[2].endswith(".xml"):
+    # FAKE_ADB_STALE_UI_XML simulates a dump file left behind by an earlier command.
+    stale = load_arg("FAKE_ADB_STALE_UI_XML")
+    if load_arg("FAKE_ADB_UI_FAIL") == "1" and not stale:
+        sys.stderr.write("cat: " + args[2] + ": No such file or directory\n")
+        sys.exit(1)
+    sys.stdout.write(stale if load_arg("FAKE_ADB_UI_FAIL") == "1" else current_ui_xml())
+    sys.exit(0)
+
+if args[:3] == ["shell", "rm", "-f"]:
     sys.exit(0)
 
 if args == ["shell", "wm", "size"]:
@@ -139,8 +174,35 @@ if args[:3] == ["shell", "input", "keyevent"]:
     sys.exit(0)
 
 if args[:3] == ["shell", "input", "swipe"]:
+    state = os.environ.get("FAKE_ADB_STATE_DIR")
+    if state:
+        (pathlib.Path(state) / "swipes").write_text(str(swipe_count() + 1))
     sys.stdout.write("\n")
     sys.exit(0)
+
+if len(args) == 2 and args[0] == "shell" and args[1].startswith("input tap "):
+    sys.stdout.write("\n")
+    sys.exit(0)
+
+if args[:3] == ["shell", "pm", "path"]:
+    if args[3] in load_arg("FAKE_ADB_INSTALLED_PACKAGES", "com.example").split(","):
+        sys.stdout.write("package:/data/app/" + args[3] + "/base.apk\n")
+        sys.exit(0)
+    sys.exit(1)
+
+if args[:3] == ["shell", "am", "force-stop"]:
+    sys.exit(0)
+
+if args[:3] == ["shell", "pm", "clear"]:
+    sys.stdout.write("Success\n")
+    sys.exit(0)
+
+if args[:1] == ["uninstall"]:
+    if args[1] in load_arg("FAKE_ADB_INSTALLED_PACKAGES", "com.example").split(","):
+        sys.stdout.write("Success\n")
+        sys.exit(0)
+    sys.stdout.write("Failure [DELETE_FAILED_INTERNAL_ERROR]\n")
+    sys.exit(1)
 
 if args[:2] == ["logcat", "-c"]:
     sys.stdout.write("\n")
@@ -150,8 +212,12 @@ if args[:2] == ["logcat", "-d"]:
     sys.stdout.write(load_arg("FAKE_ADB_LOGCAT", "03-20 12:00:00.000  1234  1234 E Example: boom\n"))
     sys.exit(0)
 
-if args[:2] == ["shell", "pidof"]:
-    sys.stdout.write(load_arg("FAKE_ADB_PIDOF", "1234\n"))
+if args == ["shell", "ps", "-A", "-o", "PID,NAME"]:
+    sys.stdout.write(
+        "  PID NAME\n"
+        "    1 init\n"
+        + load_arg("FAKE_ADB_PS", " 1234 com.example\n 5678 com.example.other\n")
+    )
     sys.exit(0)
 
 if args[:2] == ["install", "-r"]:
@@ -181,6 +247,9 @@ if args == ["-list-avds"]:
     sys.exit(0)
 
 if args[:1] == ["-avd"]:
+    if os.environ.get("FAKE_EMULATOR_FAIL") == "1":
+        sys.stdout.write("PANIC: Unknown AVD name [" + args[1] + "]\n")
+        sys.exit(1)
     sys.exit(0)
 
 sys.stderr.write("Unhandled fake emulator args\n")
@@ -265,11 +334,193 @@ class AndroidToolTestCase(unittest.TestCase):
         self.assertEqual(payload["bestMatch"]["resourceId"], "com.example:id/btn_login")
         self.assertEqual(payload["bestMatch"]["center"], {"x": 200, "y": 230})
 
-    def test_input_text_reports_escaped_value(self):
-        proc = self.run_cli("input", "text", "--text", "Hello World!", "--json")
+    def adb_calls(self, env):
+        log = pathlib.Path(env["FAKE_ADB_LOG"])
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def logged_env(self, name):
+        env = self.base_env()
+        env["FAKE_ADB_LOG"] = str(self.base / f"{name}.log")
+        state = self.base / f"{name}-state"
+        state.mkdir(exist_ok=True)
+        env["FAKE_ADB_STATE_DIR"] = str(state)
+        for stale in [pathlib.Path(env["FAKE_ADB_LOG"]), state / "swipes"]:
+            if stale.exists():
+                stale.unlink()
+        return env
+
+    def test_input_text_quotes_text_for_device_shell(self):
+        env = self.logged_env("text")
+        proc = self.run_cli("input", "text", "--text", "it's 100%sure\nok", "--json", env=env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         payload = json.loads(proc.stdout)
-        self.assertEqual(payload["escaped"], "Hello%sWorld\\!")
+        self.assertEqual(payload["steps"], [{"text": "it's 100%"}, {"text": "sure"}, {"key": "enter"}, {"text": "ok"}])
+        sent = [call for call in self.adb_calls(env) if call[:2] == ["shell", "input"]]
+        self.assertEqual(
+            sent,
+            [
+                ["shell", "input", "text", "'it'\\''s%s100%'"],
+                ["shell", "input", "text", "'sure'"],
+                ["shell", "input", "keyevent", "66"],
+                ["shell", "input", "text", "'ok'"],
+            ],
+        )
+
+    def test_input_text_rejects_non_ascii(self):
+        proc = self.run_cli("input", "text", "--text", "héllo", "--json")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("printable ASCII", json.loads(proc.stderr)["error"])
+
+    def test_input_double_tap_sends_one_shell_command(self):
+        env = self.logged_env("double-tap")
+        proc = self.run_cli("input", "double-tap", "--x", "10", "--y", "20", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(["shell", "input tap 10 20 & sleep 0.1; input tap 10 20; wait"], self.adb_calls(env))
+
+    def test_tap_element_taps_best_match_center(self):
+        env = self.logged_env("tap-element")
+        proc = self.run_cli("input", "tap-element", "--by", "content-desc", "--value", "navigate", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(["shell", "input", "tap", "40", "40"], self.adb_calls(env))
+
+    def test_exact_match_beats_clickable_partial_match(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_XML"] = SAMPLE_UI_XML.replace(
+            "</hierarchy>",
+            '<node index="2" text="Log" resource-id="" class="android.widget.TextView" content-desc="" '
+            'clickable="false" enabled="true" focused="false" checked="false" scrollable="false" '
+            'bounds="[0,400][100,440]" />\n</hierarchy>',
+        )
+        proc = self.run_cli("ui", "find", "--by", "text", "--value", "Log", "--json", env=env)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["bestMatch"]["text"], "Log")
+        self.assertEqual(payload["count"], 2)
+
+        proc = self.run_cli("ui", "find", "--by", "text", "--value", "Log", "--exact", "--json", env=env)
+        payload = json.loads(proc.stdout)
+        self.assertEqual([match["text"] for match in payload["matches"]], ["Log"])
+
+    def test_wait_element_returns_when_element_present(self):
+        proc = self.run_cli("wait", "element", "--by", "text", "--value", "Login", "--timeout", "2000", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["element"]["text"], "Login")
+
+    def test_wait_element_timeout_reports_last_dump_error(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_FAIL"] = "1"
+        proc = self.run_cli(
+            "wait", "element", "--by", "text", "--value", "Login", "--timeout", "300", "--interval", "50", "--json",
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 1)
+        error = json.loads(proc.stderr)["error"]
+        self.assertIn("did not appear within 300ms", error)
+        self.assertIn("The last UI dump failed", error)
+
+    def test_wait_element_fails_fast_when_device_disconnects(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_FAIL"] = "1"
+        env["FAKE_ADB_DEVICES"] = "List of devices attached\n"
+        proc = self.run_cli(
+            "wait", "element", "--device", "emulator-5554", "--by", "text", "--value", "Login",
+            "--timeout", "60000", "--json", env=env,
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("no longer connected", json.loads(proc.stderr)["error"])
+
+    def test_scroll_find_swipes_in_requested_direction_until_found(self):
+        env = self.logged_env("scroll")
+        env["FAKE_ADB_SCROLLS_NEEDED"] = "2"
+        env["FAKE_ADB_UI_XML_SCROLLED"] = SAMPLE_UI_XML.replace('text="Login"', 'text="Privacy"')
+        # The screen is unchanged after the first swipe, so the end-of-list guard stops the scroll.
+        proc = self.run_cli(
+            "scroll", "find", "--by", "text", "--value", "Privacy", "--direction", "up", "--pause", "0", "--json",
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("after scrolling up", json.loads(proc.stderr)["error"])
+        swipes = [call for call in self.adb_calls(env) if call[:3] == ["shell", "input", "swipe"]]
+        self.assertEqual(swipes[0][3:7], ["540", "600", "540", "1800"])
+
+        env = self.logged_env("scroll-found")
+        env["FAKE_ADB_SCROLLS_NEEDED"] = "1"
+        env["FAKE_ADB_UI_XML_SCROLLED"] = SAMPLE_UI_XML.replace('text="Login"', 'text="Privacy"')
+        proc = self.run_cli("scroll", "find", "--by", "text", "--value", "Privacy", "--pause", "0", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["scrolls"], 1)
+        self.assertEqual(payload["direction"], "down")
+
+    def test_scroll_find_inside_container(self):
+        env = self.logged_env("scroll-container")
+        env["FAKE_ADB_UI_XML"] = SAMPLE_UI_XML.replace(
+            "</hierarchy>",
+            '<node index="3" text="" resource-id="com.example:id/carousel" class="androidx.recyclerview.widget.RecyclerView" '
+            'content-desc="" clickable="false" enabled="true" focused="false" checked="false" scrollable="true" '
+            'bounds="[0,1000][1000,1200]" />\n</hierarchy>',
+        )
+        env["FAKE_ADB_SCROLLS_NEEDED"] = "1"
+        env["FAKE_ADB_UI_XML_SCROLLED"] = SAMPLE_UI_XML.replace('text="Login"', 'text="Item 9"')
+        proc = self.run_cli(
+            "scroll", "find", "--by", "text", "--value", "Item 9", "--direction", "right",
+            "--container-by", "resource-id", "--container-value", "carousel", "--pause", "0", "--json", env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        swipes = [call for call in self.adb_calls(env) if call[:3] == ["shell", "input", "swipe"]]
+        self.assertEqual(swipes, [["shell", "input", "swipe", "750", "1100", "250", "1100", "500"]])
+
+    def test_app_launch_uses_monkey_without_activity(self):
+        env = self.logged_env("launch")
+        proc = self.run_cli("app", "launch", "--package", "com.example", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(
+            ["shell", "monkey", "-p", "com.example", "-c", "android.intent.category.LAUNCHER", "1"],
+            self.adb_calls(env),
+        )
+
+    def test_app_stop_and_clear_data(self):
+        env = self.logged_env("app-reset")
+        for action in ["stop", "clear-data"]:
+            proc = self.run_cli("app", action, "--package", "com.example", "--json", env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        calls = self.adb_calls(env)
+        self.assertIn(["shell", "am", "force-stop", "com.example"], calls)
+        self.assertIn(["shell", "pm", "clear", "com.example"], calls)
+
+    def test_app_commands_fail_for_missing_package(self):
+        for action in ["stop", "clear-data", "uninstall"]:
+            proc = self.run_cli("app", action, "--package", "com.missing", "--json")
+            self.assertEqual(proc.returncode, 1, action)
+            self.assertIn("com.missing", json.loads(proc.stderr)["error"])
+
+    def test_start_emulator_fails_fast_when_emulator_exits(self):
+        env = self.base_env()
+        env["FAKE_EMULATOR_FAIL"] = "1"
+        proc = self.run_cli("device", "start-emulator", "--avd-name", "Nope", "--timeout", "60000", "--json", env=env)
+        self.assertEqual(proc.returncode, 1)
+        error = json.loads(proc.stderr)["error"]
+        self.assertIn("exited with code 1 before booting", error)
+        self.assertIn("Unknown AVD name", error)
+
+    def test_guide_lists_and_prints_guides(self):
+        proc = self.run_cli("guide", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("contract", json.loads(proc.stdout)["guides"])
+        proc = self.run_cli("guide", "android-tap")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("name: android-tap", proc.stdout)
+
+    def test_bin_wrapper_runs_tool_through_symlink(self):
+        link_dir = self.base / "pathbin"
+        link_dir.mkdir(exist_ok=True)
+        link = link_dir / "android-adb"
+        if not link.exists():
+            link.symlink_to(REPO_ROOT / "bin" / "android-adb")
+        proc = subprocess.run(
+            [str(link), "device", "list", "--json"], capture_output=True, text=True, env=self.base_env(), cwd=self.base
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["count"], 1)
 
     def test_app_install_uses_explicit_package_name(self):
         proc = self.run_cli("app", "install", "--apk", str(self.apk_path), "--package", "com.example", "--json")
@@ -302,6 +553,74 @@ class AndroidToolTestCase(unittest.TestCase):
         self.assertEqual(payload["lineCount"], 1)
         self.assertIn("Example: boom", payload["lines"][0])
 
+    def test_debug_logs_applies_line_limit_after_package_filter(self):
+        env = self.logged_env("logs-limit")
+        env["FAKE_ADB_LOGCAT"] = "".join(
+            f"03-20 12:00:0{i}.000  {pid}  {pid} E Tag: line {i}\n"
+            for i, pid in enumerate([1234, 9999, 1234, 9999, 1234])
+        )
+        proc = self.run_cli("debug", "logs", "--package", "com.example", "--lines", "2", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual([line.split(": ")[-1] for line in payload["lines"]], ["line 2", "line 4"])
+        logcat = [call for call in self.adb_calls(env) if call[:1] == ["logcat"]]
+        self.assertNotIn("-t", logcat[0])
+
+    def test_debug_logs_includes_secondary_processes(self):
+        env = self.base_env()
+        env["FAKE_ADB_PS"] = " 4321 com.example:remote\n 5678 com.example.other\n"
+        env["FAKE_ADB_LOGCAT"] = (
+            "03-20 12:00:00.000  4321  4321 E Remote: from remote\n"
+            "03-20 12:00:00.000  5678  5678 E Other: other package\n"
+        )
+        proc = self.run_cli("debug", "logs", "--package", "com.example", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(len(payload["lines"]), 1)
+        self.assertIn("from remote", payload["lines"][0])
+
+    def test_ui_dump_ignores_stale_dump_file(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_FAIL"] = "1"
+        env["FAKE_ADB_STALE_UI_XML"] = SAMPLE_UI_XML
+        proc = self.run_cli("ui", "find", "--by", "text", "--value", "Login", "--json", env=env)
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("Unable to read UI hierarchy", json.loads(proc.stderr)["error"])
+
+    def test_wait_element_timeout_bounds_slow_ui_dumps(self):
+        env = self.base_env()
+        env["FAKE_ADB_UI_DELAY"] = "5"
+        start = time.time()
+        proc = self.run_cli("wait", "element", "--by", "text", "--value", "Login", "--timeout", "1000", "--json", env=env)
+        elapsed = time.time() - start
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("did not appear within 1000ms", json.loads(proc.stderr)["error"])
+        self.assertLess(elapsed, 4)
+
+    def test_scroll_uses_override_display_size(self):
+        env = self.logged_env("scroll-override")
+        env["FAKE_ADB_WM_SIZE"] = "Physical size: 1080x2400\nOverride size: 720x1600\n"
+        proc = self.run_cli("scroll", "find", "--by", "text", "--value", "Missing", "--pause", "0", "--json", env=env)
+        self.assertEqual(proc.returncode, 1)
+        swipes = [call for call in self.adb_calls(env) if call[:3] == ["shell", "input", "swipe"]]
+        self.assertEqual(swipes[0][3:7], ["360", "1200", "360", "400"])
+
+    def test_device_info_reports_override_size_and_density(self):
+        env = self.base_env()
+        env["FAKE_ADB_WM_SIZE"] = "Physical size: 1080x2400\nOverride size: 720x1600\n"
+        env["FAKE_ADB_WM_DENSITY"] = "Physical density: 440\nOverride density: 320\n"
+        proc = self.run_cli("device", "info", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual((payload["screenSize"], payload["density"]), ("720x1600", "320"))
+
+    def test_debug_logs_fails_when_package_not_running(self):
+        env = self.base_env()
+        env["FAKE_ADB_PS"] = " 5678 com.example.other\n"
+        proc = self.run_cli("debug", "logs", "--package", "com.example", "--json", env=env)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("is not running", json.loads(proc.stderr)["error"])
+
 
 class AndroidToolUnitTestCase(unittest.TestCase):
     @classmethod
@@ -322,6 +641,13 @@ class AndroidToolUnitTestCase(unittest.TestCase):
     def test_parse_bounds_rejects_non_positive_dimensions(self):
         self.assertIsNone(self.module.parse_bounds("[10,20][10,220]"))
         self.assertIsNone(self.module.parse_bounds("[10,20][110,20]"))
+
+    def test_plan_text_input_splits_literal_percent_s(self):
+        self.assertEqual(self.module.plan_text_input("%s%s"), [{"text": "%"}, {"text": "s%"}, {"text": "s"}])
+
+    def test_plan_text_input_rejects_empty_text(self):
+        with self.assertRaises(self.module.ToolError):
+            self.module.plan_text_input("")
 
     def test_parse_ui_xml_filters_relevant_nodes(self):
         elements = self.module.parse_ui_xml(SAMPLE_UI_XML)

@@ -1,15 +1,15 @@
 ---
 name: android
-description: General-purpose Android automation. Use for multi-step Android tasks that should be executed through the local ./tools/android command layer instead of raw adb.
-allowed-tools: Bash(./tools/android:*), Bash(adb:*), Glob
+description: General-purpose Android automation. Use for multi-step Android tasks that should be executed through the local android-adb command layer instead of raw adb.
+allowed-tools: Bash(android-adb:*), Bash(adb:*), Glob
 argument-hint: what you want to do on the Android device
 ---
 
-Use `./tools/android` as the default execution layer. Read `docs/command-contract.md` if you need the exact command surface.
+Use `android-adb` as the default execution layer. Run `android-adb guide contract` for the full command surface, or `android-adb <group> --help` for one command group.
 
 Workflow:
 
-1. Start with `./tools/android device list --json`.
+1. Start with `android-adb device list --json`.
 2. If multiple devices are attached and the user did not choose one, stop and ask.
 3. Break the request into steps and route each step to the right command family:
    - screenshots: `screenshot`

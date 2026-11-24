@@ -10,22 +10,11 @@ This repo can support an AI-driven Android development loop where the agent:
 6. verifies the result
 7. repeats until the feature or bugfix is correct
 
-The key idea is that `./tools/android` gives the agent a deterministic device-control layer, while your app repo still owns the build, test, and source code edits.
+The key idea is that `android-adb` gives the agent a deterministic device-control layer, while your app repo still owns the build, test, and source code edits.
 
 ## Recommended Setup
 
-Use this repo inside the Android app repo you actually want to work on.
-
-Copy:
-
-```bash
-cp AGENTS.md /path/to/app/
-cp -r docs /path/to/app/docs
-cp -r skills /path/to/app/skills
-cp -r tools /path/to/app/tools
-```
-
-Then let the agent work from the app repo root, where it can:
+Install the toolkit once (see the README: the Claude Code plugin, or a clone with `bin/` on your `PATH`), then start the agent from the root of the Android app repo you want to work on. From there it can:
 
 - edit app code
 - run Gradle builds
@@ -97,7 +86,7 @@ This repo is best used as the outer loop around development, not as the only tes
 For a feature or bugfix, the agent should usually follow this sequence:
 
 1. Build the app in the app repo.
-2. Install the APK with `./tools/android app install --apk ... --json`.
+2. Install the APK with `android-adb app install --apk ... --json`.
 3. Launch the app.
 4. Use `screenshot`, `ui dump`, and `ui find` to establish the starting state.
 5. Perform one interaction at a time.
@@ -111,30 +100,30 @@ Build and install:
 
 ```bash
 ./gradlew :app:assembleDebug
-./tools/android app install --apk app/build/outputs/apk/debug/app-debug.apk --json
+android-adb app install --apk app/build/outputs/apk/debug/app-debug.apk --json
 ```
 
 Launch and inspect:
 
 ```bash
-./tools/android app launch --package com.example.app --activity .MainActivity --json
-./tools/android screenshot --out /tmp/start.png --json
-./tools/android ui dump --json
+android-adb app launch --package com.example.app --activity .MainActivity --json
+android-adb screenshot --out /tmp/start.png --json
+android-adb ui dump --json
 ```
 
 Interact and verify:
 
 ```bash
-./tools/android input tap-element --by text --value "Login" --json
-./tools/android wait element --by text --value "Home" --timeout 10000 --json
-./tools/android screenshot --out /tmp/home.png --json
+android-adb input tap-element --by text --value "Login" --json
+android-adb wait element --by text --value "Home" --timeout 10000 --json
+android-adb screenshot --out /tmp/home.png --json
 ```
 
 Debug failures:
 
 ```bash
-./tools/android debug clear-logs --json
-./tools/android debug logs --package com.example.app --level E --lines 200 --json
+android-adb debug clear-logs --json
+android-adb debug logs --package com.example.app --level E --lines 200 --json
 ```
 
 ## Suggested Prompt Pattern

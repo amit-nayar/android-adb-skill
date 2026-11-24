@@ -1,16 +1,16 @@
 ---
 name: android-gesture
-description: Perform Android gestures through ./tools/android input commands.
-allowed-tools: Bash(./tools/android:*), Bash(adb:*)
+description: Perform Android gestures through android-adb input commands.
+allowed-tools: Bash(android-adb:*), Bash(adb:*)
 argument-hint: gesture to perform
 ---
 
 Map requests to command-layer actions:
 
 - tap: `input tap`
-- long press: `input swipe` from a point to itself with a long duration
+- double tap: `input double-tap` (one command, so the taps land close enough together)
+- long press: `input swipe` from a point to itself with a long duration, for example `--duration 800`
 - swipe / drag: `input swipe`
-- double tap: run two `input tap` commands in sequence and then verify
 
 If the user names an element instead of coordinates, resolve it first with `ui find` or `input tap-element`.
 
