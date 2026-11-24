@@ -50,35 +50,22 @@ Quick check:
 
 ## Installation
 
-### Codex
-
-Copy these into your project root:
+Copy the core folders into your project root:
 
 ```bash
-cp AGENTS.md /path/to/project/
-cp -r docs /path/to/project/docs
-cp -r skills /path/to/project/skills
-cp -r tools /path/to/project/tools
+cp -r docs skills tools /path/to/project/
 ```
 
-Codex will read `AGENTS.md`, then use `docs/command-contract.md` plus the relevant skill file.
+Then add the instructions file for your agent:
 
-### Claude Code / Cursor / Copilot / other agents
+| Agent | Instructions file |
+|---|---|
+| Codex and other agents that read `AGENTS.md` | Copy `AGENTS.md` to the project root. |
+| Claude Code | Copy `AGENTS.md` to the project root, then create a `CLAUDE.md` next to it containing the single line `@AGENTS.md`. Claude Code reads `CLAUDE.md`, not `AGENTS.md`, and the `@` line imports it. |
+| Cursor | Copy `.cursor/rules/android-adb.mdc` to the same path in your project. |
+| GitHub Copilot | Copy `.github/copilot-instructions.md` to the same path in your project. |
 
-Copy the same core folders:
-
-```bash
-cp -r docs /path/to/project/docs
-cp -r skills /path/to/project/skills
-cp -r tools /path/to/project/tools
-```
-
-Then add the agent-specific adapter file from this repo:
-
-- `CLAUDE.md`
-- `.cursor/rules/android-adb.mdc`
-- `.github/copilot-instructions.md`
-- `AGENTS.md` for agents that read a single root instructions file
+If your project already has one of these files, merge the contents instead of overwriting it.
 
 ## Command Layer
 
@@ -176,7 +163,6 @@ android-adb-skill/
 │   ├── android-install/SKILL.md
 │   └── android-device/SKILL.md
 ├── AGENTS.md
-├── CLAUDE.md
 ├── .cursor/rules/android-adb.mdc
 ├── .github/copilot-instructions.md
 ├── .github/workflows/test.yml
