@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import json
 import os
 import pathlib
@@ -652,12 +653,66 @@ def cmd_input_tap(args):
     print_output({"deviceId": device_id, "x": args.x, "y": args.y, "action": "tap"}, args.json)
 
 
+ADBKEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+ADBKEYBOARD_PACKAGE = "com.android.adbkeyboard"
+
+
+def _is_adbkeyboard_installed(device_id):
+    """Check if ADBKeyboard package is present on the device."""
+    output = adb_text(
+        ["shell", "pm", "list", "packages", ADBKEYBOARD_PACKAGE],
+        device_id=device_id, check=False, timeout=10,
+    ).strip()
+    return f"package:{ADBKEYBOARD_PACKAGE}" in output
+
+
+def _get_current_ime(device_id):
+    """Return the current IME ID, or None if unset."""
+    output = adb_text(
+        ["shell", "settings", "get", "secure", "default_input_method"],
+        device_id=device_id, check=False, timeout=10,
+    ).strip()
+    return output or None
+
+
+def _set_ime(ime_id, device_id):
+    """Switch to the given input method."""
+    adb_text(["shell", "ime", "set", ime_id], device_id=device_id, timeout=10)
+
+
+def _broadcast_text(text, device_id):
+    """Send text via ADBKeyboard broadcast intent (no keyboard popup)."""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    adb_text(
+        ["shell", "am", "broadcast", "-a", "ADB_INPUT_B64",
+         "--es", "msg", encoded],
+        device_id=device_id, timeout=10,
+    )
+
+
 def cmd_input_text(args):
     device_id = choose_device(args.device)
+
+    # Try headless IME path first (no keyboard popup, stable layout)
+    if _is_adbkeyboard_installed(device_id):
+        previous_ime = _get_current_ime(device_id)
+        try:
+            _set_ime(ADBKEYBOARD_IME, device_id)
+            _broadcast_text(args.text, device_id)
+            print_output(
+                {"deviceId": device_id, "action": "text", "text": args.text, "method": "ime"},
+                args.json,
+            )
+            return
+        finally:
+            if previous_ime:
+                _set_ime(previous_ime, device_id)
+
+    # Fallback: standard input text (pops up soft keyboard)
     escaped = escape_input_text(args.text)
     adb_text(["shell", "input", "text", escaped], device_id=device_id, timeout=10)
     print_output(
-        {"deviceId": device_id, "action": "text", "text": args.text, "escaped": escaped},
+        {"deviceId": device_id, "action": "text", "text": args.text, "escaped": escaped, "method": "default"},
         args.json,
     )
 

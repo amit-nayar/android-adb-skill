@@ -166,6 +166,49 @@ if args[:3] == ["shell", "am", "start"]:
     sys.stdout.write("Starting: Intent\n")
     sys.exit(0)
 
+# ADBKeyboard detection
+if args[2:4] == ["list", "packages"] and "com.android.adbkeyboard" in args:
+    if load_arg("FAKE_ADB_ADBKEYBOARD_INSTALLED", "0") == "1":
+        sys.stdout.write("package:com.android.adbkeyboard\n")
+    sys.exit(0)
+
+# IME get
+if args[:3] == ["shell", "settings", "get"] and len(args) >= 5 and args[-1] == "default_input_method":
+    sys.stdout.write(load_arg("FAKE_ADB_CURRENT_IME", "com.google.android.inputmethod.latin/.LatinIME\n"))
+    sys.exit(0)
+
+# IME set
+if args[:3] == ["shell", "ime", "set"]:
+    sys.stdout.write("")
+    sys.exit(0)
+
+# Broadcast text (ADBKeyboard) — validates correct intent action + base64 payload
+if args[:3] == ["shell", "am", "broadcast"]:
+    # Record full invocation so tests can assert on exact arguments
+    record_path = os.environ.get("FAKE_ADB_BROADCAST_LOG")
+    if record_path:
+        with open(record_path, "a") as f:
+            f.write(" ".join(args) + "\n")
+    # Validate the intent action
+    if "-a" not in args or "ADB_INPUT_B64" not in args:
+        sys.stderr.write(f"ERROR: expected -a ADB_INPUT_B64, got: {' '.join(args)}\n")
+        sys.exit(1)
+    # Reject the wrong action name (the bug we're guarding against)
+    if "ADB_INPUT_TEXT" in args:
+        sys.stderr.write("ERROR: ADB_INPUT_TEXT is not supported, use ADB_INPUT_B64\n")
+        sys.exit(1)
+    # Validate --es msg contains something base64-like
+    msg_idx = None
+    for i, a in enumerate(args):
+        if a == "--es" and i + 2 < len(args) and args[i + 1] == "msg":
+            msg_idx = i + 2
+            break
+    if msg_idx is None:
+        sys.stderr.write("ERROR: missing --es msg <payload>\n")
+        sys.exit(1)
+    sys.stdout.write("Broadcasting: Intent\n")
+    sys.exit(0)
+
 sys.stderr.write("Unhandled fake adb args: " + " ".join(args) + "\n")
 sys.exit(1)
 """
@@ -270,6 +313,66 @@ class AndroidToolTestCase(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["escaped"], "Hello%sWorld\\!")
+        self.assertEqual(payload["method"], "default")
+
+    def test_input_text_falls_back_when_ime_missing(self):
+        proc = self.run_cli("input", "text", "--text", "hello world", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["method"], "default")
+        self.assertEqual(payload["text"], "hello world")
+        self.assertIn("escaped", payload)
+
+    def test_input_text_uses_ime_when_available(self):
+        env = self.base_env()
+        env["FAKE_ADB_ADBKEYBOARD_INSTALLED"] = "1"
+        proc = self.run_cli("input", "text", "--text", "hello world", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["method"], "ime")
+        self.assertEqual(payload["text"], "hello world")
+
+    def test_input_text_handles_unicode_via_ime(self):
+        env = self.base_env()
+        env["FAKE_ADB_ADBKEYBOARD_INSTALLED"] = "1"
+        proc = self.run_cli("input", "text", "--text", "Hello 🌍 émoji!", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["method"], "ime")
+        self.assertEqual(payload["text"], "Hello 🌍 émoji!")
+
+    def test_input_text_broadcasts_with_correct_action_and_base64(self):
+        import base64
+        log_file = str(self.base / "broadcast_log.txt")
+        env = self.base_env()
+        env["FAKE_ADB_ADBKEYBOARD_INSTALLED"] = "1"
+        env["FAKE_ADB_BROADCAST_LOG"] = log_file
+        text = "test payload"
+        proc = self.run_cli("input", "text", "--text", text, "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # Inspect what the fake adb actually received
+        lines = pathlib.Path(log_file).read_text().strip().splitlines()
+        self.assertEqual(len(lines), 1)  # exactly one broadcast call
+        invocation = lines[0]
+        # Must use ADB_INPUT_B64 (not ADB_INPUT_TEXT — that was the bug)
+        self.assertIn("-a", invocation)
+        self.assertIn("ADB_INPUT_B64", invocation)
+        self.assertNotIn("ADB_INPUT_TEXT", invocation)
+        self.assertNotIn("is_base64", invocation)
+        # Must carry a valid base64-encoded --es msg
+        self.assertIn("--es", invocation)
+        self.assertIn("msg", invocation)
+        expected_b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        self.assertIn(expected_b64, invocation)
+
+    def test_input_text_restores_ime_after_typing(self):
+        env = self.base_env()
+        env["FAKE_ADB_ADBKEYBOARD_INSTALLED"] = "1"
+        env["FAKE_ADB_CURRENT_IME"] = "com.example/.CustomIME\n"
+        proc = self.run_cli("input", "text", "--text", "restored", "--json", env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["method"], "ime")
 
     def test_app_install_uses_explicit_package_name(self):
         proc = self.run_cli("app", "install", "--apk", str(self.apk_path), "--package", "com.example", "--json")
