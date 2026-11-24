@@ -1,16 +1,16 @@
 ---
 name: android-device
-description: Manage Android devices and emulators through ./tools/android device commands.
-allowed-tools: Bash(./tools/android:*), Bash(adb:*), Bash(emulator:*)
+description: Manage Android devices and emulators through android-adb device commands.
+allowed-tools: Bash(android-adb:*), Bash(adb:*), Bash(emulator:*)
 argument-hint: device or emulator action to perform
 ---
 
 Use:
 
-- `./tools/android device list --json`
-- `./tools/android device info --json`
-- `./tools/android device avds --json`
-- `./tools/android device start-emulator --avd-name ... --json`
+- `android-adb device list --json`
+- `android-adb device info --json`
+- `android-adb device avds --json`
+- `android-adb device start-emulator --avd-name ... --json`
 
 Guidelines:
 

@@ -1,0 +1,13 @@
+{
+  "name": "android-adb-skill",
+  "owner": {
+    "name": "Amit Nayar"
+  },
+  "plugins": [
+    {
+      "name": "android-adb-skill",
+      "source": "./",
+      "description": "Android device automation via ADB — screenshots, UI inspection, gestures, app management, and debugging"
+    }
+  ]
+}
